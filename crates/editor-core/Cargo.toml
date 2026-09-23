@@ -1,0 +1,8 @@
+[package]
+name = "ale-editor-core"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ropey.workspace = true

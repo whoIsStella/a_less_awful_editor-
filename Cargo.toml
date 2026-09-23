@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/app",
+    "crates/ui",
+    "crates/editor-core",
+    "crates/editor-view",
+]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+gpui = "=0.2.2"
+gpui_platform = { version = "=0.1.0", features = ["font-kit", "wayland", "x11"] }
+ropey = "1.6.1"
+
+ale-editor-core = { path = "crates/editor-core" }
+ale-editor-view = { path = "crates/editor-view" }
+ale-ui = { path = "crates/ui" }

@@ -1,0 +1,10 @@
+[package]
+name = "a-less-awful-editor"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+ale-ui.workspace = true

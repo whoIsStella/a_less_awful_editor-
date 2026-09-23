@@ -1,0 +1,10 @@
+[package]
+name = "ale-ui"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+ale-editor-core.workspace = true
+ale-editor-view.workspace = true
