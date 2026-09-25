@@ -1,9 +1,8 @@
 use ale_ui::AppShell;
-use gpui::{App, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_platform::application;
+use gpui::{App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size};
 
 fn main() {
-    application().run(|cx: &mut App| {
+    Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
 
         cx.open_window(
