@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 ropey.workspace = true
+unicode-segmentation = "1.12"
