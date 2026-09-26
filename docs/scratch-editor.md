@@ -1,85 +1,133 @@
-# Interactive scratch editor
+# Single-file editor
 
-## Scope
+This milestone extends the existing native scratch editor with one open/edit/save
+workflow. It starts with an empty **Untitled** buffer. Nothing is written until
+Save or Save As succeeds. A `*` in the document label and native title indicates
+unsaved edits. The label shows the full selected path; the title uses ASCII
+separators for compatibility with the Linux window manager.
 
-This increment replaces the static center pane with a stateful, in-memory scratch
-buffer. It does **not** open, overwrite, or save project files. Closing the app
-loses scratch contents. The tab and status bar state that explicitly.
-
-File navigation, terminal execution, language diagnostics, and debugging remain
-unimplemented. Bottom-panel tabs change their explanatory placeholder content;
-they do not start services. Fake filenames, terminal prompts, Git branch labels,
-and error counts have been removed.
-
-## Implementation
-
-- `editor-core` owns the rope, scalar-indexed selections, grapheme navigation and
-  deletion, UTF-16 conversions, and a 256-entry undo history. It has no GPUI
-  dependency. Native IME preedit updates are grouped into one undo operation.
-- `editor-view` is a focused GPUI entity. A native `EntityInputHandler` accepts
-  text and composition updates. Keyboard events handle editing commands only;
-  printable text is not reconstructed from physical keycodes.
-- A custom element shapes visible lines, paints selections and a steady caret,
-  and caches the same geometry for mouse hit testing. Tabs expand only in the
-  display mapping. The old 200-line display cutoff is removed.
-- Wheel scrolling and caret reveal share viewport state. Line/column status is
-  derived from the buffer rather than a hard-coded label.
-
-GPUI integration was written against the published **0.2.2** interfaces, not the
-newer upstream `gpui_platform` API:
-
-- https://docs.rs/crate/gpui/0.2.2/source/examples/input.rs
-- https://docs.rs/gpui/0.2.2/gpui/trait.EntityInputHandler.html
-- https://docs.rs/ropey/1.6.1/ropey/struct.Rope.html
+File navigation, terminal execution, diagnostics, Git, and debugging remain
+unimplemented. Bottom tabs show explanatory messages; Output also displays
+recoverable file errors. No services are started by these tabs.
 
 ## Controls
 
-Click the center pane to focus and position the caret. Drag or Shift-click to
-select. Use arrows, Shift+arrows, Home/End, Ctrl+Home/End, Enter, Tab,
-Backspace/Delete. Ctrl+A/C/X/V select all/copy/cut/paste. Ctrl+Z undoes;
-Ctrl+Shift+Z or Ctrl+Y redoes. On macOS use Command for the clipboard/history
-shortcuts. The caret is steady, not blinking, in this increment.
+- Ctrl+O opens a single file through the native file picker.
+- Ctrl+S saves; an untitled document asks for a destination.
+- Ctrl+Shift+S saves under another path. Existing destinations require explicit
+  confirmation, even if the platform picker already asked.
+- Ctrl+W, Ctrl+Q, the application's Quit menu, and the native window close button
+  use the same Save / Discard / Cancel guard. Saving before continuing rechecks
+  edits that arrived during the save. Cancelling any step keeps the document.
+- On macOS the application shortcuts use Command. macOS/Windows runtime behavior
+  has not been exercised in this milestone.
 
-## Verification
+Click to position the caret, drag or Shift-click to select. Arrows,
+Shift+arrows, Home/End, Ctrl+Home/End, Enter, Tab, Backspace/Delete, and
+Ctrl+A/C/X/V work in the editor. Ctrl+Z undoes; Ctrl+Shift+Z or Ctrl+Y redoes.
+The caret is steady. Wheel scrolling and caret reveal have no 200-line cutoff.
 
-The new direct `unicode-segmentation` dependency requires a one-time update of the
-workspace lockfile; do not delete an existing lockfile or `target/` directory.
+Linux confirmations use a small GPUI dialog with wrapping, scrollable detail,
+and keyboard support. Escape cancels. Tab/Shift+Tab or Up/Down choose a button;
+Enter activates it. Cancel is selected initially. Native file pickers require
+a functioning desktop portal (see [Linux setup](../README.md#linux-setup)).
+
+## Boundaries and state
+
+- `editor-core` owns the rope, scalar-indexed selections, grapheme navigation,
+  UTF-16 conversions, and a 256-entry undo history. It has **no GPUI or filesystem
+  dependency**. `scripts/check-editor-core-boundary.py` traverses the complete
+  resolved dependency graph, including transitive dependencies, to enforce this.
+- `editor-view` owns native input/composition, focus, shaping, hit testing,
+  selection/caret painting, and scrolling. Document replacement resets history,
+  composition, and viewport state without replacing the editor entity.
+- `ui` owns dialogs, document path/disk version, and the serialized file workflow.
+  Reads, UTF-8 validation, rope construction, serialization, conflict checks,
+  writes, and syncs run on GPUI's background executor. Editing remains available
+  during file I/O; a second document operation waits until the first finishes.
+- Save captures an immutable rope snapshot. Revision IDs travel with undo/redo;
+  completion marks that snapshot's revision saved, not the current revision.
+  Undo back to the saved revision clears `*`. Manually retyping identical content
+  on a different history branch can still show dirty; no whole-document equality
+  scan or hash is added to the normal keypress path.
+- GPUI is the published `=0.2.2` crate. No `gpui_platform` dependency is used.
+
+## File safety and limits
+
+Only regular strict UTF-8 text up to **16 MiB** is supported. Invalid UTF-8,
+NUL and control characters other than Tab/CR/LF are rejected with an error.
+UTF-8 BOMs, Unicode, existing LF/CRLF/CR, and mixed endings round-trip unchanged.
+Enter uses the first existing line-ending style (LF for a new buffer); pasted
+text keeps its supplied endings. Encoding conversion is not implemented.
+
+A failed or cancelled Open leaves the existing document intact. A failed or
+cancelled Save leaves its buffer, path, and saved revision intact. Errors are
+shown in the status bar and the scrollable Output panel.
+
+Saving writes a uniquely named temporary file in the destination directory,
+flushes and syncs it, checks the destination again, then installs the temporary
+file. A new destination uses create-only persistence; an existing destination
+uses atomic replacement. On Unix the parent directory is synced after install.
+A directory-sync failure explicitly reports that the file was replaced but its
+power-loss durability is uncertain, and leaves the buffer dirty.
+
+Conflict detection compares disk bytes, modification time, and Unix identity /
+permission metadata against the version read or last saved. External changes,
+replacement, deletion, or a Save As collision require an explicit Overwrite
+choice. That choice is tied to the observed version; a subsequent change causes
+another conflict. Cancel always leaves the external file untouched.
+
+Symbolic links, including symlink parent directories, are rejected. Read-only
+files, multiply linked files, special permission bits, and ownership/group that
+cannot be retained are rejected for overwrite. Ordinary Unix mode bits are
+preserved; new files use tempfile's restrictive permissions. On Linux, files
+with extended attributes/ACLs (or unreadable attribute lists) are rejected rather
+than silently losing metadata. Existing-file overwrite is explicitly rejected
+on other operating systems until their metadata preservation policy is implemented. Use Save As to a new regular file when a case is
+unsupported.
+
+**Concurrency/durability limits:** the last comparison and replacement are not
+one compare-and-swap operation. Another writer can race between them; parent
+path components can also race. There is no cross-process lock, watcher, backup,
+crash recovery, or protection against hostile directory mutation. Reads cannot
+promise a coherent snapshot against writers changing data in place while
+restoring metadata. Atomic rename/sync behavior depends on the filesystem;
+network filesystems and power-loss behavior have not been validated. Process
+kill, desktop session termination, and GPUI's already-committed shutdown callback
+cannot be cancelled; the application guards its Quit action and window-close
+request *before* shutdown. Native IME candidate behavior still needs testing on
+the target input method.
+
+## Validation
+
+Run from the existing checkout; preserve `Cargo.lock` and `target/`:
 
 ```sh
-cargo test -p ale-editor-core
-cargo test --locked -p ale-editor-view
 cargo fmt --all -- --check
+cargo test --locked --workspace
 cargo check --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo build --locked -p a-less-awful-editor
+python3 scripts/check-editor-core-boundary.py
 cargo run --locked -p a-less-awful-editor
 ```
 
-The core suite includes the two original tests and regression cases for empty
-buffers, multiline edits, reversed selections, undo/redo invalidation, combining
-characters, emoji, CRLF boundaries, vertical column retention, surrogate-pair
-ranges, composition undo, invalid ranges, and edits beyond line 200. Renderer
-unit tests exercise tab/Unicode mapping and empty-line caret mapping.
+Tests use temporary directories only. Core and persistence tests cover snapshot
+saves, undo cleanliness, Unicode and mixed newline round trips, failure retention,
+unsupported files, permissions/links, external conflicts and late conflict
+rechecks. GPUI simulated interactions exercise clipboard/selection/history,
+Save As, cancellation, dirty replacement/close guards, edits during a pending
+save/close, composition protocol, focus restoration, resize, and scrolling past
+line 200. Simulation does not establish native IME or portal behavior.
 
-**These added tests and the new GUI have not been executed in the authoring
-environment.** It has no Rust toolchain and cannot resolve package-host DNS.
-Static API review is not compilation or runtime verification. Keep this increment
-on its feature branch until the commands above and the manual checks below pass.
+See [milestone validation](single-file-validation.md) for the executed native
+acceptance checks and their limitations. Local checks do not establish GitHub
+Actions success; CI was not run remotely for this change.
 
-### Manual acceptance
+## Remaining editor limitations
 
-Type multiple lines, move the caret, select in both directions, replace a
-selection, paste multiline Unicode text, undo and redo. Test `e` plus a combining
-accent, a joined emoji, and pasted CRLF text. Confirm scrolling reaches lines
-beyond 200 and the caret returns to view after a keyboard edit. Test native input
-composition on the target desktop rather than assuming the protocol integration
-is sufficient. Click each bottom tab and check that its placeholder changes.
-Resize, close, and confirm the process exits normally.
-
-### Remaining limitations
-
-No file persistence/recovery, syntax highlighting, multi-cursor, word navigation,
-soft wrapping, selection autoscroll outside the pane, or accessibility adapter.
-Tab stops count source scalars, not full Unicode display-cell widths. Complex
-bidirectional selection geometry and platform IME behavior need further testing.
-Very long individual lines are shaped/scanned in full; no giant-file or latency
-claim is made. The history limit bounds undo entries, not total retained bytes.
+No syntax highlighting, multi-cursor, word navigation, soft wrapping, selection
+autoscroll outside the pane, or accessibility adapter. Tab stops count scalars,
+not full Unicode display-cell widths. Complex bidi selection geometry is
+unverified. Very long lines are shaped/scanned in full; no large-file latency
+claim is made. The history limit bounds entries, not retained bytes.

@@ -1,16 +1,15 @@
 //! Stateful native input and viewport rendering. Text/history remain in editor-core.
-//! This is an in-memory scratch editor: it does not read or save project files.
+//! Filesystem operations are owned by the shell, never the input handler.
 
 use std::ops::Range;
 
-use ale_editor_core::{EditorBuffer, Movement, Position};
+use ale_editor_core::{EditorBuffer, Movement, Position, TextSnapshot};
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    ScrollWheelEvent, ShapedLine, Style, TextRun, UTF16Selection, Window, div,
-    fill, point, prelude::*, px, relative, rgb, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId,
+    IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, ScrollWheelEvent, ShapedLine, Style, TextRun, UTF16Selection, Window,
+    div, fill, point, prelude::*, px, relative, rgb, size,
 };
 
 const LINE_HEIGHT: f32 = 23.0;
@@ -41,6 +40,30 @@ impl EditorView {
             reveal_caret: true,
             selecting: false,
         }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.buffer.is_dirty()
+    }
+
+    pub fn save_snapshot(&mut self) -> TextSnapshot {
+        self.finish_composition();
+        self.buffer.text_snapshot()
+    }
+
+    pub fn mark_saved(&mut self, snapshot: &TextSnapshot, cx: &mut Context<Self>) {
+        self.buffer.mark_saved(snapshot);
+        cx.notify();
+    }
+
+    pub fn load(&mut self, buffer: EditorBuffer, cx: &mut Context<Self>) {
+        self.buffer = buffer;
+        self.marked = None;
+        self.rows.clear();
+        self.scroll_y = 0.0;
+        self.scroll_x = 0.0;
+        self.selecting = false;
+        self.changed(cx);
     }
 
     pub fn cursor(&self) -> Position {
@@ -87,7 +110,9 @@ impl EditorView {
                 "c" | "x" => {
                     self.finish_composition();
                     if !self.buffer.selection().range().is_empty() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(self.buffer.selected_text()));
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            self.buffer.selected_text(),
+                        ));
                         if key == "x" {
                             self.buffer.insert("");
                         }
@@ -120,7 +145,7 @@ impl EditorView {
                     match key {
                         "backspace" => self.buffer.backspace(),
                         "delete" => self.buffer.delete_forward(),
-                        "enter" => self.buffer.insert("\n"),
+                        "enter" => self.buffer.insert_newline(),
                         "tab" => self.buffer.insert("\t"),
                         _ => unreachable!(),
                     }
@@ -136,11 +161,15 @@ impl EditorView {
 
     fn offset_at(&self, position: Point<Pixels>) -> Option<usize> {
         let first = self.rows.first()?;
-        let row_index = ((f32::from(position.y - first.origin.y) / LINE_HEIGHT).floor()
-            .max(0.0) as usize).min(self.rows.len() - 1);
+        let row_index = ((f32::from(position.y - first.origin.y) / LINE_HEIGHT)
+            .floor()
+            .max(0.0) as usize)
+            .min(self.rows.len() - 1);
         let row = &self.rows[row_index];
         let byte = row.text.closest_index_for_x(position.x - row.origin.x);
-        let column = row.byte_offsets.partition_point(|offset| *offset <= byte)
+        let column = row
+            .byte_offsets
+            .partition_point(|offset| *offset <= byte)
             .saturating_sub(1);
         Some(self.buffer.snap_boundary(row.start + column))
     }
@@ -157,7 +186,9 @@ impl EditorView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.selecting && let Some(offset) = self.offset_at(event.position) {
+        if self.selecting
+            && let Some(offset) = self.offset_at(event.position)
+        {
             self.buffer.move_to(offset, true);
             self.changed(cx);
         }
@@ -208,14 +239,19 @@ impl Render for EditorView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::scroll))
-            .child(EditorElement { editor: cx.entity() })
+            .child(EditorElement {
+                editor: cx.entity(),
+            })
     }
 }
 
 impl EntityInputHandler for EditorView {
     fn text_for_range(
-        &mut self, range: Range<usize>, actual: &mut Option<Range<usize>>,
-        _: &mut Window, _: &mut Context<Self>,
+        &mut self,
+        range: Range<usize>,
+        actual: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<String> {
         let range = self.buffer.range_from_utf16(range);
         *actual = Some(self.buffer.range_to_utf16(range.clone()));
@@ -223,7 +259,10 @@ impl EntityInputHandler for EditorView {
     }
 
     fn selected_text_range(
-        &mut self, _: bool, _: &mut Window, _: &mut Context<Self>,
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         let selection = self.buffer.selection();
         Some(UTF16Selection {
@@ -233,7 +272,9 @@ impl EntityInputHandler for EditorView {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.marked.clone().map(|range| self.buffer.range_to_utf16(range))
+        self.marked
+            .clone()
+            .map(|range| self.buffer.range_to_utf16(range))
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -242,10 +283,14 @@ impl EntityInputHandler for EditorView {
     }
 
     fn replace_text_in_range(
-        &mut self, range: Option<Range<usize>>, text: &str,
-        _: &mut Window, cx: &mut Context<Self>,
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
     ) {
-        let range = range.map(|range| self.buffer.range_from_utf16(range))
+        let range = range
+            .map(|range| self.buffer.range_from_utf16(range))
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.buffer.selection().range());
         self.buffer.replace_range(range, text);
@@ -254,17 +299,24 @@ impl EntityInputHandler for EditorView {
     }
 
     fn replace_and_mark_text_in_range(
-        &mut self, range: Option<Range<usize>>, text: &str,
-        selected: Option<Range<usize>>, _: &mut Window, cx: &mut Context<Self>,
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        selected: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
     ) {
-        let range = range.map(|range| self.buffer.range_from_utf16(range))
+        let range = range
+            .map(|range| self.buffer.range_from_utf16(range))
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.buffer.selection().range());
         let start = range.start;
         let start_utf16 = self.buffer.char_to_utf16(start);
         self.buffer.begin_edit_group();
         self.buffer.replace_range(range, text);
-        self.marked = if text.is_empty() { None } else {
+        self.marked = if text.is_empty() {
+            None
+        } else {
             Some(start..start + text.chars().count())
         };
         if let Some(selected) = selected {
@@ -278,22 +330,33 @@ impl EntityInputHandler for EditorView {
     }
 
     fn bounds_for_range(
-        &mut self, range: Range<usize>, _: Bounds<Pixels>,
-        _: &mut Window, _: &mut Context<Self>,
+        &mut self,
+        range: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.buffer.range_from_utf16(range);
-        let row = self.rows.iter().find(|row| range.start >= row.start && range.start <= row.end())?;
+        let row = self
+            .rows
+            .iter()
+            .find(|row| range.start >= row.start && range.start <= row.end())?;
         let start = row.x_for_offset(range.start);
         let end = row.x_for_offset(range.end.min(row.end()));
-        Some(Bounds::new(point(start, row.origin.y), size(
-            px(f32::from(end - start).max(1.0)), px(LINE_HEIGHT),
-        )))
+        Some(Bounds::new(
+            point(start, row.origin.y),
+            size(px(f32::from(end - start).max(1.0)), px(LINE_HEIGHT)),
+        ))
     }
 
     fn character_index_for_point(
-        &mut self, point: Point<Pixels>, _: &mut Window, _: &mut Context<Self>,
+        &mut self,
+        point: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<usize> {
-        self.offset_at(point).map(|offset| self.buffer.char_to_utf16(offset))
+        self.offset_at(point)
+            .map(|offset| self.buffer.char_to_utf16(offset))
     }
 }
 
@@ -313,7 +376,9 @@ impl VisualLine {
     }
 
     fn x_for_offset(&self, offset: usize) -> Pixels {
-        let column = offset.saturating_sub(self.start).min(self.byte_offsets.len() - 1);
+        let column = offset
+            .saturating_sub(self.start)
+            .min(self.byte_offsets.len() - 1);
         self.origin.x + self.text.x_for_index(self.byte_offsets[column])
     }
 }
@@ -343,20 +408,29 @@ struct EditorElement {
 
 impl IntoElement for EditorElement {
     type Element = Self;
-    fn into_element(self) -> Self { self }
+    fn into_element(self) -> Self {
+        self
+    }
 }
 
 impl Element for EditorElement {
     type RequestLayoutState = ();
     type PrepaintState = Vec<VisualLine>;
 
-    fn id(&self) -> Option<ElementId> { None }
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
 
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
 
     fn request_layout(
-        &mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>,
-        window: &mut Window, cx: &mut App,
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> (LayoutId, ()) {
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
@@ -365,15 +439,23 @@ impl Element for EditorElement {
     }
 
     fn prepaint(
-        &mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>,
-        bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App,
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
     ) -> Vec<VisualLine> {
         self.editor.update(cx, |editor, _| {
             let height = f32::from(bounds.size.height).max(1.0);
             let visible = (height / LINE_HEIGHT).ceil().max(1.0) as usize;
             let max_scroll = (editor.buffer.line_count() as f32 * LINE_HEIGHT - height).max(0.0);
             editor.scroll_y = editor.scroll_y.clamp(0.0, max_scroll);
-            if editor.bounds.is_none_or(|previous| previous.size != bounds.size) {
+            if editor
+                .bounds
+                .is_none_or(|previous| previous.size != bounds.size)
+            {
                 editor.reveal_caret = true;
             }
             let caret_y = editor.buffer.cursor().line as f32 * LINE_HEIGHT;
@@ -392,31 +474,57 @@ impl Element for EditorElement {
                 let content = editor.buffer.line_content(index).unwrap_or_default();
                 let (display, byte_offsets) = expand_tabs(&content);
                 let run = TextRun {
-                    len: display.len(), font: style.font(), color: style.color,
-                    background_color: None, underline: None, strikethrough: None,
+                    len: display.len(),
+                    font: style.font(),
+                    color: style.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
                 };
-                let text = window.text_system().shape_line(display.into(), font_size, &[run], None);
+                let text = window
+                    .text_system()
+                    .shape_line(display.into(), font_size, &[run], None);
                 let label = format!("{:>5}", index + 1);
                 let run = TextRun {
-                    len: label.len(), font: style.font(), color: rgb(0x747e90).into(),
-                    background_color: None, underline: None, strikethrough: None,
+                    len: label.len(),
+                    font: style.font(),
+                    color: rgb(0x747e90).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
                 };
-                let number = window.text_system().shape_line(label.into(), font_size, &[run], None);
+                let number = window
+                    .text_system()
+                    .shape_line(label.into(), font_size, &[run], None);
                 rows.push(VisualLine {
-                    start: editor.buffer.line_start(index), text, number, byte_offsets,
-                    origin: point(bounds.left() + px(GUTTER), bounds.top() + px(index as f32 * LINE_HEIGHT - editor.scroll_y)),
+                    start: editor.buffer.line_start(index),
+                    text,
+                    number,
+                    byte_offsets,
+                    origin: point(
+                        bounds.left() + px(GUTTER),
+                        bounds.top() + px(index as f32 * LINE_HEIGHT - editor.scroll_y),
+                    ),
                 });
             }
             if editor.reveal_caret {
                 let head = editor.buffer.selection().head;
-                if let Some(row) = rows.iter().find(|row| head >= row.start && head <= row.end()) {
+                if let Some(row) = rows
+                    .iter()
+                    .find(|row| head >= row.start && head <= row.end())
+                {
                     let x = f32::from(row.x_for_offset(head) - row.origin.x);
                     let width = (f32::from(bounds.size.width) - GUTTER - 8.0).max(1.0);
-                    if x < editor.scroll_x { editor.scroll_x = x; }
-                    if x > editor.scroll_x + width { editor.scroll_x = x - width; }
+                    if x < editor.scroll_x {
+                        editor.scroll_x = x;
+                    }
+                    if x > editor.scroll_x + width {
+                        editor.scroll_x = x - width;
+                    }
                 }
             }
-            let widest = rows.iter()
+            let widest = rows
+                .iter()
                 .map(|row| f32::from(row.x_for_offset(row.end()) - row.origin.x))
                 .fold(0.0_f32, f32::max);
             let width = (f32::from(bounds.size.width) - GUTTER - 8.0).max(1.0);
@@ -431,61 +539,109 @@ impl Element for EditorElement {
     }
 
     fn paint(
-        &mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>,
-        bounds: Bounds<Pixels>, _: &mut (), rows: &mut Vec<VisualLine>,
-        window: &mut Window, cx: &mut App,
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        rows: &mut Vec<VisualLine>,
+        window: &mut Window,
+        cx: &mut App,
     ) {
         let (focus, selection, marked) = {
             let editor = self.editor.read(cx);
-            (editor.focus.clone(), editor.buffer.selection(), editor.marked.clone())
+            (
+                editor.focus.clone(),
+                editor.buffer.selection(),
+                editor.marked.clone(),
+            )
         };
-        window.handle_input(&focus, ElementInputHandler::new(bounds, self.editor.clone()), cx);
+        window.handle_input(
+            &focus,
+            ElementInputHandler::new(bounds, self.editor.clone()),
+            cx,
+        );
         let range = selection.range();
         let text_bounds = Bounds::new(
             point(bounds.left() + px(GUTTER), bounds.top()),
-            size(px((f32::from(bounds.size.width) - GUTTER).max(0.0)), bounds.size.height),
+            size(
+                px((f32::from(bounds.size.width) - GUTTER).max(0.0)),
+                bounds.size.height,
+            ),
         );
-        window.with_content_mask(Some(ContentMask { bounds: text_bounds }), |window| {
-            for row in rows.iter() {
-                if range.start <= row.end() && range.end > row.start {
-                    let x1 = row.x_for_offset(range.start.max(row.start));
-                    let mut x2 = row.x_for_offset(range.end.min(row.end()));
-                    if range.end > row.end() { x2 += px(8.0); }
-                    window.paint_quad(fill(
-                        Bounds::new(point(x1, row.origin.y), size(px(f32::from(x2 - x1).max(1.0)), px(LINE_HEIGHT))),
-                        rgb(0x304466),
-                    ));
-                }
-                if let Err(error) = row.text.paint(row.origin, px(LINE_HEIGHT), window, cx) {
-                    eprintln!("editor text paint failed: {error}");
-                }
-                if let Some(marked) = &marked
-                    && marked.start <= row.end() && marked.end > row.start
-                {
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: text_bounds,
+            }),
+            |window| {
+                for row in rows.iter() {
+                    if range.start <= row.end() && range.end > row.start {
+                        let x1 = row.x_for_offset(range.start.max(row.start));
+                        let mut x2 = row.x_for_offset(range.end.min(row.end()));
+                        if range.end > row.end() {
+                            x2 += px(8.0);
+                        }
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(x1, row.origin.y),
+                                size(px(f32::from(x2 - x1).max(1.0)), px(LINE_HEIGHT)),
+                            ),
+                            rgb(0x304466),
+                        ));
+                    }
+                    if let Err(error) = row.text.paint(row.origin, px(LINE_HEIGHT), window, cx) {
+                        eprintln!("editor text paint failed: {error}");
+                    }
+                    if let Some(marked) = &marked
+                        && marked.start <= row.end()
+                        && marked.end > row.start
+                    {
                         let x1 = row.x_for_offset(marked.start.max(row.start));
                         let x2 = row.x_for_offset(marked.end.min(row.end()));
                         window.paint_quad(fill(
-                            Bounds::new(point(x1, row.origin.y + px(LINE_HEIGHT - 2.0)), size(px(f32::from(x2 - x1).max(1.0)), px(1.0))),
+                            Bounds::new(
+                                point(x1, row.origin.y + px(LINE_HEIGHT - 2.0)),
+                                size(px(f32::from(x2 - x1).max(1.0)), px(1.0)),
+                            ),
                             rgb(0x9abcf5),
                         ));
+                    }
+                    if focus.is_focused(window)
+                        && selection.head >= row.start
+                        && selection.head <= row.end()
+                    {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(row.x_for_offset(selection.head), row.origin.y + px(2.0)),
+                                size(px(2.0), px(LINE_HEIGHT - 4.0)),
+                            ),
+                            rgb(0xa8c8ff),
+                        ));
+                    }
                 }
-                if focus.is_focused(window) && selection.head >= row.start && selection.head <= row.end() {
-                    window.paint_quad(fill(
-                        Bounds::new(point(row.x_for_offset(selection.head), row.origin.y + px(2.0)), size(px(2.0), px(LINE_HEIGHT - 4.0))),
-                        rgb(0xa8c8ff),
-                    ));
-                }
-            }
-        });
+            },
+        );
         let gutter_bounds = Bounds::new(bounds.origin, size(px(GUTTER), bounds.size.height));
-        window.with_content_mask(Some(ContentMask { bounds: gutter_bounds }), |window| {
-            for row in rows.iter() {
-                if let Err(error) = row.number.paint(point(bounds.left() + px(6.0), row.origin.y), px(LINE_HEIGHT), window, cx) {
-                    eprintln!("editor gutter paint failed: {error}");
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: gutter_bounds,
+            }),
+            |window| {
+                for row in rows.iter() {
+                    if let Err(error) = row.number.paint(
+                        point(bounds.left() + px(6.0), row.origin.y),
+                        px(LINE_HEIGHT),
+                        window,
+                        cx,
+                    ) {
+                        eprintln!("editor gutter paint failed: {error}");
+                    }
                 }
-            }
+            },
+        );
+        self.editor.update(cx, |editor, _| {
+            editor.rows = std::mem::take(rows);
         });
-        self.editor.update(cx, |editor, _| { editor.rows = std::mem::take(rows); });
     }
 }
 
@@ -503,5 +659,97 @@ mod tests {
     #[test]
     fn empty_line_has_a_valid_caret_position() {
         assert_eq!(expand_tabs(""), (String::new(), vec![0]));
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use gpui::{ScrollDelta, TestAppContext, TouchPhase};
+
+    #[gpui::test]
+    fn scrolling_beyond_200_lines_caret_reveal_and_resize(cx: &mut TestAppContext) {
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let view = EditorView::new(&"line\r\n".repeat(500), cx);
+            view.focus.focus(window);
+            view
+        });
+        cx.simulate_keystrokes("ctrl-end");
+        cx.update(|_, cx| {
+            let view = editor.read(cx);
+            assert_eq!(view.cursor().line, 500);
+            assert!(view.scroll_y > 200.0 * LINE_HEIGHT);
+            assert!(
+                view.rows
+                    .iter()
+                    .any(|row| row.start == view.buffer.line_start(500))
+            );
+        });
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.scroll(
+                    &ScrollWheelEvent {
+                        position: point(px(100.0), px(100.0)),
+                        delta: ScrollDelta::Pixels(point(px(0.0), px(5000.0))),
+                        modifiers: Default::default(),
+                        touch_phase: TouchPhase::Moved,
+                    },
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_input("x");
+        cx.simulate_resize(size(px(640.0), px(400.0)));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let view = editor.read(cx);
+            assert_eq!(
+                view.cursor(),
+                Position {
+                    line: 500,
+                    column: 1
+                }
+            );
+            assert!(
+                view.rows
+                    .iter()
+                    .any(|row| row.start == view.buffer.line_start(500))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn native_composition_utf16_commit_undo_and_document_replacement(cx: &mut TestAppContext) {
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let view = EditorView::new("", cx);
+            view.focus.focus(window);
+            view
+        });
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                assert_eq!(editor.marked_text_range(window, cx), Some(0..2));
+                editor.replace_text_in_range(None, "你😀", window, cx);
+                assert_eq!(
+                    editor.selected_text_range(false, window, cx).unwrap().range,
+                    3..3
+                );
+                assert!(editor.marked.is_none());
+            })
+        });
+        cx.simulate_keystrokes("ctrl-z");
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                assert!(editor.buffer.is_empty());
+                editor.replace_and_mark_text_in_range(None, "preedit", None, window, cx);
+                editor.load(EditorBuffer::with_text("new file"), cx);
+                assert!(editor.marked.is_none());
+                assert!(!editor.is_dirty());
+                assert!(editor.focus.is_focused(window));
+                assert!(!editor.buffer.undo());
+            })
+        });
     }
 }

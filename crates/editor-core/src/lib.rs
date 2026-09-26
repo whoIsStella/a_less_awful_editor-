@@ -45,6 +45,20 @@ pub enum Movement {
 struct Snapshot {
     text: Rope,
     selection: Selection,
+    revision: u64,
+}
+
+/// Cheap immutable rope snapshot. Serialization belongs on a background worker.
+#[derive(Debug, Clone)]
+pub struct TextSnapshot {
+    text: Rope,
+    revision: u64,
+}
+
+impl TextSnapshot {
+    pub fn write_to(&self, writer: impl std::io::Write) -> std::io::Result<()> {
+        self.text.write_to(writer)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +69,10 @@ pub struct EditorBuffer {
     undo: VecDeque<Snapshot>,
     redo: Vec<Snapshot>,
     group: Option<Snapshot>,
+    revision: u64,
+    next_revision: u64,
+    saved_revision: u64,
+    newline: &'static str,
 }
 
 impl Default for EditorBuffer {
@@ -76,7 +94,36 @@ impl EditorBuffer {
             undo: VecDeque::new(),
             redo: Vec::new(),
             group: None,
+            revision: 0,
+            next_revision: 1,
+            saved_revision: 0,
+            newline: match text.find(['\r', '\n']) {
+                Some(i) if text[i..].starts_with("\r\n") => "\r\n",
+                Some(i) if text[i..].starts_with('\r') => "\r",
+                _ => "\n",
+            },
         }
+    }
+
+    pub fn text_snapshot(&self) -> TextSnapshot {
+        TextSnapshot {
+            text: self.text.clone(),
+            revision: self.revision,
+        }
+    }
+
+    /// Must be a snapshot from this document; a save may finish after newer edits.
+    pub fn mark_saved(&mut self, snapshot: &TextSnapshot) {
+        self.saved_revision = snapshot.revision;
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.revision != self.saved_revision
+    }
+
+    /// Existing and pasted bytes are retained; Enter uses the first line ending.
+    pub fn insert_newline(&mut self) {
+        self.insert(self.newline);
     }
 
     pub fn line_count(&self) -> usize {
@@ -89,8 +136,10 @@ impl EditorBuffer {
 
     pub fn line_content(&self, line: usize) -> Option<String> {
         self.line_text(line).map(|text| {
-            text.trim_end_matches(['\r', '\n', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}'])
-                .to_owned()
+            text.trim_end_matches([
+                '\r', '\n', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}',
+            ])
+            .to_owned()
         })
     }
 
@@ -101,7 +150,10 @@ impl EditorBuffer {
     pub fn position(&self, offset: usize) -> Position {
         let offset = offset.min(self.len_chars());
         let line = self.text.char_to_line(offset);
-        Position { line, column: offset - self.line_start(line) }
+        Position {
+            line,
+            column: offset - self.line_start(line),
+        }
     }
 
     pub fn cursor(&self) -> Position {
@@ -138,7 +190,11 @@ impl EditorBuffer {
 
     pub fn move_to(&mut self, offset: usize, extend: bool) {
         let offset = self.snap_boundary(offset.min(self.len_chars()));
-        let anchor = if extend { self.selection.anchor } else { offset };
+        let anchor = if extend {
+            self.selection.anchor
+        } else {
+            offset
+        };
         self.set_selection(anchor, offset);
     }
 
@@ -167,8 +223,14 @@ impl EditorBuffer {
                 self.line_start(line) + column.min(length)
             }
             Movement::LineStart => self.line_start(position.line),
-            Movement::LineEnd => self.line_start(position.line)
-                + self.line_content(position.line).unwrap_or_default().chars().count(),
+            Movement::LineEnd => {
+                self.line_start(position.line)
+                    + self
+                        .line_content(position.line)
+                        .unwrap_or_default()
+                        .chars()
+                        .count()
+            }
             Movement::DocumentStart => 0,
             Movement::DocumentEnd => self.len_chars(),
         };
@@ -190,6 +252,8 @@ impl EditorBuffer {
             }
             self.text.remove(range.clone());
             self.text.insert(range.start, text);
+            self.revision = self.next_revision;
+            self.next_revision += 1;
         }
         let head = range.start + text.chars().count();
         self.set_selection(head, head);
@@ -224,11 +288,13 @@ impl EditorBuffer {
     }
 
     pub fn end_edit_group(&mut self) {
-        if let Some(before) = self.group.take()
-            && before.text != self.text
-        {
-            self.push_undo(before);
-            self.redo.clear();
+        if let Some(before) = self.group.take() {
+            if before.text != self.text {
+                self.push_undo(before);
+                self.redo.clear();
+            } else {
+                self.revision = before.revision;
+            }
         }
     }
 
@@ -259,7 +325,8 @@ impl EditorBuffer {
     }
 
     pub fn utf16_to_char(&self, offset: usize) -> usize {
-        self.text.utf16_cu_to_char(offset.min(self.text.len_utf16_cu()))
+        self.text
+            .utf16_cu_to_char(offset.min(self.text.len_utf16_cu()))
     }
 
     pub fn range_to_utf16(&self, range: Range<usize>) -> Range<usize> {
@@ -325,10 +392,15 @@ impl EditorBuffer {
     }
 
     fn snapshot(&self) -> Snapshot {
-        Snapshot { text: self.text.clone(), selection: self.selection }
+        Snapshot {
+            text: self.text.clone(),
+            selection: self.selection,
+            revision: self.revision,
+        }
     }
 
     fn restore(&mut self, snapshot: Snapshot) {
+        self.revision = snapshot.revision;
         self.text = snapshot.text;
         self.selection = snapshot.selection;
         self.preferred_column = None;
@@ -497,5 +569,68 @@ mod tests {
         buffer.insert("last");
         assert_eq!(buffer.line_content(500).as_deref(), Some("last"));
         assert_eq!(buffer.cursor().line, 500);
+    }
+}
+
+#[cfg(test)]
+mod persistence_regressions {
+    use super::*;
+
+    #[test]
+    fn undo_and_redo_track_the_saved_revision() {
+        let mut buffer = EditorBuffer::with_text("first");
+        buffer.select_all();
+        buffer.insert("second");
+        let saved = buffer.text_snapshot();
+        buffer.mark_saved(&saved);
+        assert!(!buffer.is_dirty());
+        buffer.insert(" third");
+        assert!(buffer.is_dirty());
+        buffer.undo();
+        assert!(!buffer.is_dirty());
+        buffer.undo();
+        assert!(buffer.is_dirty());
+        buffer.redo();
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn completing_an_older_save_does_not_clean_newer_edits() {
+        let mut buffer = EditorBuffer::new();
+        buffer.insert("snapshot");
+        let saved = buffer.text_snapshot();
+        buffer.insert(" plus newer edits");
+        buffer.mark_saved(&saved);
+        assert!(buffer.is_dirty());
+        let mut bytes = Vec::new();
+        saved.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes, b"snapshot");
+        buffer.undo();
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn enter_preserves_first_newline_style_and_paste_is_exact() {
+        for newline in ["\n", "\r\n", "\r"] {
+            let mut buffer = EditorBuffer::with_text(&format!("a{newline}b"));
+            buffer.move_cursor(Movement::DocumentEnd, false);
+            buffer.insert_newline();
+            buffer.insert("e\u{301}👩‍💻\r\nx\ny");
+            assert_eq!(
+                buffer.text_in_range(0..buffer.len_chars()).unwrap(),
+                format!("a{newline}b{newline}e\u{301}👩‍💻\r\nx\ny")
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_composition_restores_clean_state() {
+        let mut buffer = EditorBuffer::new();
+        buffer.begin_edit_group();
+        buffer.insert("preedit");
+        buffer.replace_range(0..7, "");
+        buffer.end_edit_group();
+        assert!(!buffer.is_dirty());
+        assert!(!buffer.undo());
     }
 }

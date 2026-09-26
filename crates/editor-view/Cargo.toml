@@ -7,3 +7,6 @@ publish = false
 [dependencies]
 gpui.workspace = true
 ale-editor-core.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

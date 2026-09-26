@@ -2,6 +2,14 @@
 
 A Less Awful Editor is a local-first native IDE focused on speed, structural clarity, strong Git/debugging/terminal workflows, and minimal UI chrome.
 
+## Implemented boundary (single-file milestone)
+
+The diagrams below describe the long-term design, not currently connected
+subsystems. The implemented crates are `app`, `ui`, `editor-core`, and
+`editor-view`. Single-file persistence lives in `ui::persistence` and runs on
+background workers; it does not introduce a workspace service or filesystem
+operations in the pure editing core. See [current behavior](scratch-editor.md).
+
 ## Design goals
 
 - Native, GPU-rendered UI.
