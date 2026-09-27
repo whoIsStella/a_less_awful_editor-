@@ -1,4 +1,7 @@
-use ale_ui::{AppShell, Close, Open, Quit, Save, SaveAs};
+use ale_ui::{
+    AppShell, Close, InspectBinary, Open, Quit, Save, SaveAs, ShowAssembly, ShowBytes, ShowEditor,
+    ShowOverview, TogglePanels,
+};
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBounds, WindowOptions, px, size,
@@ -14,6 +17,12 @@ fn main() {
         };
         cx.bind_keys([
             KeyBinding::new(&format!("{modifier}-o"), Open, None),
+            KeyBinding::new(&format!("{modifier}-shift-o"), InspectBinary, None),
+            KeyBinding::new(&format!("{modifier}-1"), ShowEditor, None),
+            KeyBinding::new(&format!("{modifier}-2"), ShowOverview, None),
+            KeyBinding::new(&format!("{modifier}-3"), ShowAssembly, None),
+            KeyBinding::new(&format!("{modifier}-4"), ShowBytes, None),
+            KeyBinding::new(&format!("{modifier}-b"), TogglePanels, None),
             KeyBinding::new(&format!("{modifier}-s"), Save, None),
             KeyBinding::new(&format!("{modifier}-shift-s"), SaveAs, None),
             KeyBinding::new(&format!("{modifier}-w"), Close, None),
@@ -23,6 +32,7 @@ fn main() {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open", Open),
+                MenuItem::action("Inspect binary", InspectBinary),
                 MenuItem::action("Save", Save),
                 MenuItem::action("Save As", SaveAs),
                 MenuItem::action("Close", Close),

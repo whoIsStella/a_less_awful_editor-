@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if any resolved dependency reachable from editor-core is a GPUI crate."""
+"""Fail if either pure core has a direct or transitive GPUI dependency."""
 import json
 import subprocess
 
@@ -8,17 +8,18 @@ metadata = json.loads(subprocess.check_output(
 ))
 packages = {package["id"]: package for package in metadata["packages"]}
 nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
-root = next(key for key, package in packages.items() if package["name"] == "ale-editor-core")
-pending = [(root, ["ale-editor-core"])]
-seen = set()
-while pending:
-    package_id, path = pending.pop()
-    if package_id in seen:
-        continue
-    seen.add(package_id)
-    name = packages[package_id]["name"]
-    if "gpui" in name.lower():
-        raise SystemExit("Forbidden UI dependency: " + " -> ".join(path))
-    for dependency in nodes[package_id]["dependencies"]:
-        pending.append((dependency, path + [packages[dependency]["name"]]))
-print(f"PASS: editor-core and {len(seen) - 1} transitive dependencies are GPUI-free")
+for core in ("ale-editor-core", "ale-systems-core"):
+    root = next(key for key, package in packages.items() if package["name"] == core)
+    pending = [(root, [core])]
+    seen = set()
+    while pending:
+        package_id, path = pending.pop()
+        if package_id in seen:
+            continue
+        seen.add(package_id)
+        name = packages[package_id]["name"]
+        if "gpui" in name.lower():
+            raise SystemExit("Forbidden UI dependency: " + " -> ".join(path))
+        for dependency in nodes[package_id]["dependencies"]:
+            pending.append((dependency, path + [packages[dependency]["name"]]))
+    print(f"PASS: {core} and {len(seen) - 1} transitive dependencies are GPUI-free")

@@ -2,13 +2,26 @@
 
 A Less Awful Editor is a local-first native IDE focused on speed, structural clarity, strong Git/debugging/terminal workflows, and minimal UI chrome.
 
-## Implemented boundary (single-file milestone)
+## Implemented boundary
 
 The diagrams below describe the long-term design, not currently connected
 subsystems. The implemented crates are `app`, `ui`, `editor-core`, and
-`editor-view`. Single-file persistence lives in `ui::persistence` and runs on
+`editor-view`, plus `systems-core` for the first binary-workstation slice.
+Single-file persistence lives in `ui::persistence` and runs on
 background workers; it does not introduce a workspace service or filesystem
 operations in the pure editing core. See [current behavior](scratch-editor.md).
+
+`systems-core` owns immutable bytes, ELF/PE/Mach-O section mappings, symbols,
+bounded x86 decoding and DWARF line maps. It has no GPUI, filesystem, or process
+operations. `ui::systems` renders bounded views of one selected file offset;
+`ui::systems_shell` owns binary/source lifecycle and independent dirty guards;
+`ui::systems_io` performs bounded reads, create-only exports and optional NASM
+assembly on background workers. Source metadata does not automatically open a
+file. A source-navigation action uses the existing guarded text-open workflow.
+
+This implementation does not yet provide decompilation, a persistent analysis
+database, control-flow recovery, or debugging. See [implemented systems behavior](systems-workbench.md)
+and [full systems capability obligations](systems-capabilities.md).
 
 ## Design goals
 

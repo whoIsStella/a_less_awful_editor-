@@ -19,7 +19,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang cmake libasound2-dev libfontconfig-dev \
+            build-essential clang cmake binutils nasm libasound2-dev libfontconfig-dev \
             libglib2.0-dev libssl-dev libvulkan1 libwayland-dev \
             libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev
 
@@ -33,7 +33,7 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
-      - name: Editor core dependency boundary
+      - name: Pure core dependency boundaries
         run: python3 scripts/check-editor-core-boundary.py
 
       - name: Workspace tests

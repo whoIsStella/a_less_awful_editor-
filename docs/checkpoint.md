@@ -1,4 +1,34 @@
-# Paused checkpoint — 2026-09-26
+# Working checkpoint — 2026-09-27
+
+The single-file milestone below was subsequently merged as PR #1. Current work
+continues from merge commit `4db630b` on `codex/systems-workbench`.
+
+The first systems slice adds linked source/assembly/byte locations, binary
+metadata, x86 decoding, patch preview/history, safe copy export, independent
+text/binary close guards, and small view controls. The UI now has compact native
+chrome, file tabs, aligned assembly/hex lists and an inline command area; secondary
+controls are tucked into Details. The latest local suite passes 76 tests, and
+native acceptance covers exact export/reopen, compact/zoomed layouts, cancellation,
+and normal process exit after clean close and approved dirty text/binary closes. It preserves the existing
+native editor. See [behavior](systems-workbench.md) and
+[validation](systems-validation.md). The [capability contract](systems-capabilities.md)
+retains the full Ghidra-level goal; this slice does not complete it.
+
+Next integration work should use the verified installed-backend inventory.
+Rizin static analysis is available, but `pdgj` is absent; Cutter currently has
+unresolved Rizin 0.7 libraries. An opt-in pinned C++ Ghidra experiment verifies
+Java-free pseudocode/address-token mapping. No backend or system package was
+installed or changed. The experiment is not connected to the IDE yet.
+
+The feature changes are local until explicitly published. Keep the existing
+lockfile and target directory, inspect status before continuing, and retain the
+evidence boundary between automated tests, native acceptance and remote CI.
+
+```sh
+cargo run --locked -p a-less-awful-editor
+```
+
+## Historical pause — 2026-09-26
 
 The single-file persistence milestone is implemented on `feat/interactive-scratch`.
 The requested local checks pass: format, 35 workspace tests, workspace check,

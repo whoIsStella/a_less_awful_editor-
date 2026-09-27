@@ -8,6 +8,7 @@ publish = false
 gpui.workspace = true
 ale-editor-core.workspace = true
 ale-editor-view.workspace = true
+ale-systems-core.workspace = true
 tempfile = "3"
 libc = "0.2"
 

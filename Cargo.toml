@@ -5,6 +5,7 @@ members = [
     "crates/ui",
     "crates/editor-core",
     "crates/editor-view",
+    "crates/systems-core",
 ]
 default-members = ["crates/app"]
 
@@ -19,3 +20,4 @@ ropey = "1.6.1"
 ale-editor-core = { path = "crates/editor-core" }
 ale-editor-view = { path = "crates/editor-view" }
 ale-ui = { path = "crates/ui" }
+ale-systems-core = { path = "crates/systems-core" }
