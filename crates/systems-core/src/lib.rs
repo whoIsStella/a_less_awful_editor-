@@ -10,7 +10,12 @@ use std::{fmt, ops::Range, sync::Arc};
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter, OpKind};
 use object::{Object, ObjectSection, ObjectSymbol};
 
+mod analysis;
 mod dwarf;
+pub use analysis::{
+    Analysis, AnalysisLimits, AnalyzedFunction, BasicBlock, CrossReference, EdgeKind,
+    EdgeResolution, FlowEdge, FunctionProvenance, ReferenceKind,
+};
 
 const MAX_IMAGE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_SECTIONS: usize = 16_384;

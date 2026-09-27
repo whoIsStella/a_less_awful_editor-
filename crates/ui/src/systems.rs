@@ -8,6 +8,10 @@ use gpui::{
 };
 use std::{path::PathBuf, sync::Arc};
 
+#[path = "systems_analysis.rs"]
+mod analysis;
+use analysis::AnalysisState;
+
 #[cfg(test)]
 #[path = "systems_tests.rs"]
 mod tests;
@@ -16,6 +20,7 @@ mod tests;
 pub(crate) enum Lens {
     Overview,
     Assembly,
+    Flow,
     Bytes,
     Strings,
 }
@@ -24,6 +29,7 @@ impl Lens {
         match self {
             Self::Overview => "Overview",
             Self::Assembly => "Assembly",
+            Self::Flow => "Flow",
             Self::Bytes => "Bytes",
             Self::Strings => "Strings",
         }
@@ -90,6 +96,7 @@ pub(crate) struct Workbench {
     row_bytes: usize,
     font_size: f32,
     scroll: gpui::ScrollHandle,
+    analysis: AnalysisState,
 }
 impl EventEmitter<WorkbenchEvent> for Workbench {}
 impl Focusable for Workbench {
@@ -173,9 +180,11 @@ impl Workbench {
             row_bytes: 16,
             font_size: 12.5,
             scroll: gpui::ScrollHandle::new(),
+            analysis: AnalysisState::default(),
         };
         this.decode();
         this.refresh_entropy(cx);
+        this.refresh_analysis(cx);
         this
     }
     pub fn is_dirty(&self) -> bool {
@@ -302,6 +311,7 @@ impl Workbench {
             self.preview = None;
             self.decode();
             self.refresh_entropy(cx);
+            self.refresh_analysis(cx);
             self.message = "Patch history updated; location retained.".into();
             cx.notify();
         }
@@ -878,6 +888,7 @@ impl Render for Workbench {
         let body = match self.lens {
             Lens::Overview => self.overview(cx),
             Lens::Assembly => self.assembly(cx),
+            Lens::Flow => self.flow_view(cx),
             Lens::Bytes => self.bytes(cx),
             Lens::Strings => div()
                 .flex()

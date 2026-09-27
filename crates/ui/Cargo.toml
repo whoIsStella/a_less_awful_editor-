@@ -11,6 +11,7 @@ ale-editor-view.workspace = true
 ale-systems-core.workspace = true
 tempfile = "3"
 libc = "0.2"
+serde_json = "1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
