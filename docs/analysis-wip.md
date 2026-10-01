@@ -1,3 +1,14 @@
+# Resumed analysis integration — 2026-10-01
+
+The user explicitly resumed systems work after publishing both saved branches.
+Work continues on `codex/analysis-wip-20260927`; `codex/systems-workbench` remains
+the published prior checkpoint. The graph draft now compiles and is integrated.
+See [current validation](analysis-validation.md) for exact evidence and residuals.
+The decompiler runner and IDE pseudocode integration remain unfinished. The full
+[capability contract](systems-capabilities.md) remains the goal.
+
+## Historical handoff
+
 # Paused analysis continuation — 2026-09-27
 
 The user requested a stopping point during the next analysis milestone. The

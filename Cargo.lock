@@ -93,6 +93,7 @@ dependencies = [
  "ale-systems-core",
  "gpui",
  "libc",
+ "serde_json",
  "tempfile",
 ]
 

@@ -507,7 +507,7 @@ impl Workbench {
                     this.undo.push((this.revision,this.image.clone()));
                     while this.undo.len() > 32 || this.undo.iter().map(|(_,image)|image.bytes().len()).sum::<usize>() > 128*1024*1024 { this.undo.remove(0); }
                     this.redo.clear(); this.image = Arc::new(image); this.revision = this.next_revision; this.next_revision += 1;
-                    this.decode(); this.refresh_entropy(cx); this.message = "Patch applied in memory. Export copy to write a new file; source mappings describe the original build.".into();
+                    this.decode(); this.refresh_entropy(cx); this.refresh_analysis(cx); this.message = "Patch applied in memory. Export copy to write a new file; source mappings describe the original build.".into();
                 }
                 Err(error) => this.message = format!("Patch rejected; buffer retained: {error}"),
             }
@@ -958,7 +958,7 @@ impl Render for Workbench {
             .bg(rgb(0x101216)).text_size(px(12.0)).text_color(rgb(0xd4dce7))
             .child(div().flex().items_center().h(px(30.0)).flex_shrink_0().px_2()
                 .bg(rgb(0x15191f)).border_b_1().border_color(rgb(0x2a313c))
-                .children([Lens::Overview, Lens::Assembly, Lens::Bytes, Lens::Strings].map(|lens| {
+                .children([Lens::Overview, Lens::Assembly, Lens::Flow, Lens::Bytes, Lens::Strings].map(|lens| {
                     button(lens.name()).h(px(30.0)).px_3().border_b_2()
                         .border_color(rgb(if lens == self.lens { 0x7aa2f7 } else { 0x15191f }))
                         .when(lens == self.lens, |tab| tab.text_color(rgb(0xd4dce7)))
@@ -990,7 +990,7 @@ impl Render for Workbench {
                 .text_size(px(11.0)).text_color(rgb(0x8590a3))
                 .child(div().whitespace_normal().child(self.path.display().to_string()))
                 .child(div().flex().items_center().gap_1().py_1()
-                    .child(button(if self.inspector { "Hide symbols" } else { "Show symbols" }).on_click(cx.listener(|this, _, _, cx| { this.inspector = !this.inspector; cx.notify(); })))
+                    .child(button(if self.inspector { "Hide navigator" } else { "Show navigator" }).on_click(cx.listener(|this, _, _, cx| { this.inspector = !this.inspector; cx.notify(); })))
                     .child(button("A−").on_click(cx.listener(|this, _, _, cx| { this.font_size = (this.font_size - 1.0).max(10.0); cx.notify(); })))
                     .child(button("A+").on_click(cx.listener(|this, _, _, cx| { this.font_size = (this.font_size + 1.0).min(20.0); cx.notify(); })))
                     .child(button(format!("{} bytes / row", self.row_bytes)).on_click(cx.listener(|this, _, _, cx| { this.row_bytes = if this.row_bytes == 16 { 8 } else { 16 }; cx.notify(); })))
@@ -1002,23 +1002,7 @@ impl Render for Workbench {
                 .children(self.image.warnings.iter().map(|warning| div().whitespace_normal().text_color(rgb(0xe0af68)).child(warning.clone())))
                 .child(div().whitespace_normal().child(self.message.clone()))))
             .child(div().flex().flex_1().min_h_0()
-                .when(self.inspector, |row| row.child(div().id("binary-symbols").w(px(168.0)).flex_shrink_0()
-                    .flex().flex_col().bg(rgb(0x15191f)).border_r_1().border_color(rgb(0x2a313c))
-                    .child(div().h(px(26.0)).flex_shrink_0().flex().items_center().justify_between().px_3()
-                        .text_size(px(11.0)).text_color(rgb(0x8590a3)).child("SYMBOLS")
-                        .child(format!("{}", self.image.symbols.len())))
-                    .child(div().id("symbol-list").flex_1().min_h_0().overflow_y_scroll()
-                        .children(self.image.symbols.iter().take(256)
-                            .filter_map(|symbol| symbol.file_offset.map(|offset| (offset, symbol.name.clone(), symbol.size)))
-                            .enumerate().map(|(index, (offset, name, size))| {
-                                let selected = self.offset >= offset && self.offset < offset.saturating_add(size.max(1) as usize);
-                                div().id(("symbol", index)).h(px(22.0)).flex().items_center().px_3()
-                                    .cursor_pointer().hover(|style| style.bg(rgb(0x1c2430)))
-                                    .when(selected, |row| row.bg(rgb(0x1c2430)).text_color(rgb(0x7aa2f7)))
-                                    .when(!selected, |row| row.text_color(rgb(0x8590a3)))
-                                    .text_size(px(11.5)).truncate().child(name)
-                                    .on_click(cx.listener(move |this, _, _, cx| { this.go(offset, cx); this.lens = Lens::Assembly; }))
-                            })))))
+                .when(self.inspector || self.lens == Lens::Flow, |row| row.child(self.analysis_sidebar(cx)))
                 .child(div().id("binary-body").flex_1().min_w_0().overflow_scroll().track_scroll(&self.scroll).child(body)))
             .child(div().flex().items_center().h(px(28.0)).flex_shrink_0().px_2()
                 .border_t_1().border_color(rgb(0x2a313c)).bg(rgb(0x15191f))

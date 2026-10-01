@@ -26,7 +26,7 @@ executed, and the original binary is never a save destination.
 On macOS the application shortcuts use Command. Native acceptance has only been
 performed on Linux; other platform behavior must be separately validated.
 
-One file offset anchors Overview, Assembly, Bytes and Strings. Symbols, sections,
+One file offset anchors Overview, Assembly, Flow, Bytes and Strings. Symbols, sections,
 branches and entropy bins navigate that location; Back restores earlier offsets.
 Assembly is a bounded linear decode, not recovered control flow. Next page moves
 through the file. Details reveals symbol visibility, A-/A+ binary font size, and
@@ -115,3 +115,27 @@ parser sandbox guarantee. Parsing, search, entropy, patch reparsing, file I/O an
 assembly run off the UI thread; bounded decoding and navigation run in the view.
 General worker cancellation, worker-process isolation and analysis persistence
 remain obligations in the [full capability contract](systems-capabilities.md).
+
+## Function analysis and Flow
+
+The Flow tab exposes bounded recursive x86/x86-64 control-flow analysis on declared
+executable file-backed regions. Function candidates come from entry points,
+executable symbols and direct calls. The navigator switches between functions and
+symbols; graph instructions, edge destinations, and the References list navigate
+the same location used by Assembly, Bytes and Source. References include direct
+branches/calls and explicitly unresolved indirect transfers.
+
+Analysis runs on an immutable snapshot in the background. Apply, undo and redo
+invalidate and rebuild it; cancellation and generation/revision checks prevent a
+late result from replacing newer state. Raw bytes, ambiguous mappings and other
+architectures report unsupported analysis rather than guessing executable code.
+Defaults bound work to 128 functions, 4,096 blocks, 100,000 instruction rows and
+8 MiB of decoded bytes. Shared tails count against each function's row budget.
+The graph displays at most 64 blocks with six instruction lines per card; Listing
+opens the full linear view. The reference list displays at most 256 matches.
+
+This is candidate recovery, not proof of code/data separation or full program
+semantics. Indirect target recovery, exception flow, data references and user
+function definitions remain open. Graph routes can overlap and function membership
+can be ambiguous for shared tails. The native decompiler experiment is still
+separate; no pseudocode is presented by the IDE yet.

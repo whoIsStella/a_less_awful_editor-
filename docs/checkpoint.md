@@ -1,3 +1,23 @@
+# Active systems continuation — 2026-10-01
+
+The user explicitly resumed systems work after both saved branches were pushed.
+Current branch: `codex/analysis-wip-20260927`. The prior runnable checkpoint stays
+on `codex/systems-workbench` at `5affb7c`. No merge has been performed.
+
+The resumed branch now integrates bounded function/control-flow analysis, native
+Flow graphs and references with shared locations and patch/history invalidation.
+All 85 workspace tests, format, check, Clippy, application linking and GPUI-free
+core boundary checks passed. Native X11 tests exercised graph selection, byte
+navigation, patches/undo/redo, reference links and resize; the isolated display
+terminated before approved-close exit could be verified in this run.
+
+See [analysis validation](analysis-validation.md) for exact evidence and remaining
+obligations. The full systems goal is still active. Next: checked mapped snapshots,
+bounded native decompiler process runner, pseudocode and address-token navigation.
+The native worker fixture passes but is not yet connected to the IDE.
+
+## Historical checkpoints
+
 # Working checkpoint — 2026-09-27
 
 The single-file milestone below was subsequently merged as PR #1. Current work

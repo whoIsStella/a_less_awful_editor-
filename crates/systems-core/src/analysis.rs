@@ -77,7 +77,7 @@ pub enum EdgeKind {
     Stop,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EdgeResolution {
     Resolved,
     Unmapped,
@@ -99,7 +99,7 @@ pub struct FlowEdge {
     pub resolution: EdgeResolution,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReferenceKind {
     Call,
     ConditionalBranch,
@@ -108,7 +108,7 @@ pub enum ReferenceKind {
     IndirectJump,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CrossReference {
     pub from_address: u64,
     pub from_offset: usize,
@@ -631,7 +631,11 @@ impl Analyzer<'_> {
         let mut blocks = Vec::new();
         let mut assigned = BTreeSet::new();
         // `nodes` order also covers roots discovered through shared-tail paths.
-        let starts: Vec<_> = leaders.into_iter().chain(nodes.keys().copied()).collect();
+        let starts: Vec<_> = leaders
+            .iter()
+            .copied()
+            .chain(nodes.keys().copied())
+            .collect();
         for start in starts {
             check_cancelled(self.cancelled)?;
             if assigned.contains(&start) || !nodes.contains_key(&start) {
@@ -645,6 +649,7 @@ impl Analyzer<'_> {
             let mut instructions = Vec::new();
             let mut offset = start;
             let (address, edges) = loop {
+                check_cancelled(self.cancelled)?;
                 let node = &nodes[&offset];
                 instructions.push(node.instruction.clone());
                 assigned.insert(offset);
@@ -655,15 +660,7 @@ impl Analyzer<'_> {
                         || assigned.contains(&next)
                         || queued.contains(&nodes[&next].instruction.address) && node.ends_block
                 });
-                let other_leader = next.is_some_and(|next| {
-                    // A target with more than its sequential predecessor starts a block.
-                    nodes.values().any(|candidate| {
-                        candidate.ends_block
-                            && candidate.edges.iter().any(|edge| {
-                                edge.kind != EdgeKind::Call && edge.target_offset == Some(next)
-                            })
-                    })
-                });
+                let other_leader = next.is_some_and(|next| leaders.contains(&next));
                 if node.ends_block || split || other_leader {
                     break (nodes[&start].instruction.address, node.edges.clone());
                 }
@@ -701,6 +698,7 @@ impl Analyzer<'_> {
             })
             .collect();
         for function in &mut self.result.functions {
+            check_cancelled(self.cancelled)?;
             for block in &mut function.blocks {
                 self.result.instruction_count += block.instructions.len();
                 for edge in &mut block.edges {
@@ -716,7 +714,9 @@ impl Analyzer<'_> {
                 }
             }
         }
+        let mut references = BTreeSet::new();
         for function in &self.result.functions {
+            check_cancelled(self.cancelled)?;
             for block in &function.blocks {
                 for edge in &block.edges {
                     let kind = match edge.kind {
@@ -735,12 +735,213 @@ impl Analyzer<'_> {
                         kind,
                         resolution: edge.resolution,
                     };
-                    if !self.result.references.contains(&reference) {
-                        self.result.references.push(reference);
-                    }
+                    references.insert(reference);
                 }
             }
         }
+        self.result.references = references.into_iter().collect();
         Ok(self.result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Mapping, Section};
+
+    fn image(bytes: &[u8]) -> BinaryImage {
+        let mut image = BinaryImage::parse(bytes.to_vec()).unwrap();
+        image.format = BinaryFormat::Elf;
+        image.architecture = Architecture::X86_64;
+        image.entry = Some(0x1000);
+        image.sections = vec![Section {
+            name: ".text".into(),
+            address: 0x1000,
+            file_offset: 0,
+            size: bytes.len() as u64,
+            file_size: bytes.len(),
+            executable: true,
+        }];
+        image.mappings = vec![Mapping {
+            address: 0x1000,
+            offset: 0,
+            size: bytes.len(),
+        }];
+        image
+    }
+
+    fn analyze(image: &BinaryImage) -> Analysis {
+        image
+            .analyze(
+                &Architecture::X86_64,
+                AnalysisLimits::default(),
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn diamond_splits_join_and_excludes_unreachable_bytes() {
+        // jne 1005; nop; jmp 1006; nop; ret; unreachable nop
+        let result = analyze(&image(&[0x75, 3, 0x90, 0xeb, 1, 0x90, 0xc3, 0x90]));
+        let blocks = &result.functions[0].blocks;
+        assert_eq!(
+            blocks.iter().map(|b| b.start_offset).collect::<Vec<_>>(),
+            [0, 2, 5, 6]
+        );
+        assert_eq!(result.instruction_count, 5);
+        assert_eq!(blocks[0].edges[0].target_offset, Some(5));
+        assert_eq!(blocks[0].edges[1].target_offset, Some(2));
+        assert_eq!(blocks[1].instructions.len(), 2);
+        assert_eq!(blocks[1].edges[0].target_offset, Some(6));
+        assert_eq!(blocks[2].edges[0].target_offset, Some(6));
+        assert_eq!(blocks[3].edges[0].kind, EdgeKind::Return);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn backward_branch_splits_linear_run_at_loop_header() {
+        let result = analyze(&image(&[0x90, 0x90, 0x75, 0xfd, 0xc3]));
+        let blocks = &result.functions[0].blocks;
+        assert_eq!(
+            blocks.iter().map(|b| b.start_offset).collect::<Vec<_>>(),
+            [0, 1, 4]
+        );
+        assert_eq!(blocks[0].instructions.len(), 1);
+        assert_eq!(blocks[1].edges[0].target_offset, Some(1));
+    }
+
+    #[test]
+    fn direct_call_discovers_separate_function_and_return_path() {
+        let result = analyze(&image(&[0xe8, 1, 0, 0, 0, 0xc3, 0xc3]));
+        assert_eq!(result.functions.len(), 2);
+        assert_eq!(result.functions[1].offset, 6);
+        assert_eq!(
+            result.functions[1].provenance,
+            FunctionProvenance::DirectCall
+        );
+        assert_eq!(result.functions[0].blocks.len(), 2);
+        assert_eq!(result.references.len(), 1);
+        assert_eq!(result.references[0].kind, ReferenceKind::Call);
+        assert_eq!(result.references[0].resolution, EdgeResolution::Resolved);
+    }
+
+    #[test]
+    fn indirect_jump_does_not_decode_unreachable_tail() {
+        let result = analyze(&image(&[0xff, 0xe0, 0x90, 0xc3]));
+        assert_eq!(result.instruction_count, 1);
+        assert_eq!(result.references[0].resolution, EdgeResolution::Indirect);
+        assert_eq!(result.references[0].target_address, None);
+    }
+
+    #[test]
+    fn branch_into_instruction_is_overlap_not_resolved() {
+        let result = analyze(&image(&[0x75, 0xff, 0xc3]));
+        assert_eq!(result.references[0].target_offset, Some(1));
+        assert_eq!(result.references[0].resolution, EdgeResolution::Overlap);
+    }
+
+    #[test]
+    fn ambiguous_mapping_and_nonexecutable_targets_are_not_decoded() {
+        let mut fixture = image(&[0xeb, 0, 0xc3]);
+        fixture.mappings.push(Mapping {
+            address: 0x1002,
+            offset: 2,
+            size: 1,
+        });
+        let result = analyze(&fixture);
+        assert_eq!(result.instruction_count, 1);
+        assert_eq!(result.references[0].resolution, EdgeResolution::Overlap);
+        fixture.mappings.pop();
+        fixture.sections[0].executable = false;
+        assert!(analyze(&fixture).functions.is_empty());
+    }
+
+    #[test]
+    fn limits_bound_output_and_mark_missing_successors() {
+        let fixture = image(&[0x90, 0x90, 0xc3]);
+        for limits in [
+            AnalysisLimits {
+                max_instructions: 1,
+                ..AnalysisLimits::default()
+            },
+            AnalysisLimits {
+                max_bytes: 1,
+                ..AnalysisLimits::default()
+            },
+        ] {
+            let result = fixture
+                .analyze(&Architecture::X86_64, limits, &AtomicBool::new(false))
+                .unwrap();
+            assert!(result.truncated);
+            assert_eq!(result.instruction_count, 1);
+            assert_eq!(
+                result.functions[0].blocks[0].edges[0].resolution,
+                EdgeResolution::Limit
+            );
+        }
+        let result = image(&[0x75, 1, 0xc3, 0xc3])
+            .analyze(
+                &Architecture::X86_64,
+                AnalysisLimits {
+                    max_blocks: 1,
+                    ..AnalysisLimits::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.functions[0].blocks.len(), 1);
+        assert!(
+            result.functions[0].blocks[0]
+                .edges
+                .iter()
+                .all(|e| e.resolution == EdgeResolution::Limit)
+        );
+    }
+
+    #[test]
+    fn cancellation_raw_and_architecture_mismatch_fail_explicitly() {
+        let fixture = image(&[0xc3]);
+        assert!(
+            fixture
+                .analyze(
+                    &Architecture::X86_64,
+                    AnalysisLimits::default(),
+                    &AtomicBool::new(true)
+                )
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        assert!(
+            fixture
+                .analyze(
+                    &Architecture::X86,
+                    AnalysisLimits::default(),
+                    &AtomicBool::new(false)
+                )
+                .is_err()
+        );
+        assert!(
+            BinaryImage::parse(vec![0xc3])
+                .unwrap()
+                .analyze(
+                    &Architecture::X86_64,
+                    AnalysisLimits::default(),
+                    &AtomicBool::new(false)
+                )
+                .unwrap_err()
+                .contains("Raw")
+        );
+    }
+
+    #[test]
+    fn invalid_instruction_stops_traversal() {
+        let result = analyze(&image(&[0x0f]));
+        assert!(!result.functions[0].blocks[0].instructions[0].valid);
+        assert_eq!(
+            result.functions[0].blocks[0].edges[0].resolution,
+            EdgeResolution::Invalid
+        );
     }
 }

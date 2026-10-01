@@ -58,7 +58,13 @@ fn new_workbench(_: &mut Window, cx: &mut Context<Workbench>) -> Workbench {
 fn shared_location_survives_lens_changes_and_invalid_navigation(cx: &mut TestAppContext) {
     let (workbench, cx) = cx.add_window_view(new_workbench);
     update(&workbench, cx, |workbench, cx| workbench.go(5, cx));
-    for lens in [Lens::Bytes, Lens::Assembly, Lens::Strings, Lens::Overview] {
+    for lens in [
+        Lens::Bytes,
+        Lens::Assembly,
+        Lens::Flow,
+        Lens::Strings,
+        Lens::Overview,
+    ] {
         cx.update(|window, cx| {
             workbench.update(cx, |workbench, cx| {
                 workbench.show(lens, window, cx);
@@ -584,6 +590,31 @@ fn source_round_trip_retains_exact_instruction_and_interior_byte(cx: &mut TestAp
     });
     cx.run_until_parked();
     let workbench = cx.update(|_, cx| shell.read(cx).workbench.clone().unwrap());
+    update(&workbench, cx, |workbench, cx| {
+        assert!(
+            workbench.analysis.result.is_some(),
+            "{}",
+            workbench.analysis.status
+        );
+        workbench.go(selected_offsets[0], cx);
+        assert_eq!(workbench.selected_function().unwrap().name, "mapped_line");
+        workbench.refresh_analysis(cx);
+        assert!(workbench.analysis.result.is_none());
+        workbench.cancel_analysis(cx);
+    });
+    cx.run_until_parked();
+    update(&workbench, cx, |workbench, cx| {
+        assert!(
+            workbench.analysis.result.is_none(),
+            "Cancelled completion must not publish"
+        );
+        assert!(!workbench.analysis.running);
+        workbench.refresh_analysis(cx);
+    });
+    cx.run_until_parked();
+    update(&workbench, cx, |workbench, _| {
+        assert!(workbench.analysis.result.is_some())
+    });
     for offset in selected_offsets {
         let history = update(&workbench, cx, |workbench, cx| {
             workbench.go(offset, cx);
@@ -627,6 +658,31 @@ fn source_round_trip_retains_exact_instruction_and_interior_byte(cx: &mut TestAp
             assert_eq!(workbench.back, history);
         });
     }
+    let before = update(&workbench, cx, |workbench, cx| {
+        workbench.go(instructions[0].offset, cx);
+        workbench.analysis.result.clone().unwrap()
+    });
+    patch(&workbench, "90", cx);
+    update(&workbench, cx, |workbench, cx| {
+        let after = workbench.analysis.result.as_ref().unwrap();
+        assert!(
+            !Arc::ptr_eq(&before, after),
+            "Patch must replace analysis snapshot"
+        );
+        assert_eq!(
+            workbench.selected_function().unwrap().blocks[0].instructions[0].bytes,
+            [0x90]
+        );
+        workbench.history(false, cx);
+    });
+    cx.run_until_parked();
+    update(&workbench, cx, |workbench, _| {
+        assert_eq!(
+            workbench.selected_function().unwrap().blocks[0].instructions[0].bytes,
+            instructions[0].bytes
+        );
+        assert!(!workbench.is_dirty());
+    });
 }
 
 #[gpui::test]

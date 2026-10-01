@@ -282,6 +282,45 @@ fn compiled_elf_matches_readelf_objdump_and_addr2line() {
         "conditional and unconditional branch destinations must be checked"
     );
 
+    // Recursive recovery must independently agree with GNU instruction boundaries
+    // and direct branch destinations for this fully reachable controlled function.
+    let analysis = image
+        .analyze(
+            &Architecture::X86_64,
+            ale_systems_core::AnalysisLimits::default(),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    let function = analysis
+        .functions
+        .iter()
+        .find(|function| function.address == symbol_address)
+        .unwrap();
+    let recovered: std::collections::BTreeMap<_, _> = function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .map(|instruction| (instruction.address, &instruction.bytes))
+        .collect();
+    assert_eq!(recovered.len(), expected.len());
+    for instruction in &expected {
+        assert_eq!(
+            recovered.get(&instruction.address).copied(),
+            Some(&instruction.bytes)
+        );
+        if instruction.text.starts_with('j') {
+            let target = hex(instruction.text.split_ascii_whitespace().nth(1).unwrap());
+            assert!(
+                analysis
+                    .references
+                    .iter()
+                    .any(|reference| reference.from_address == instruction.address
+                        && reference.target_address == Some(target)
+                        && reference.resolution == ale_systems_core::EdgeResolution::Resolved)
+            );
+        }
+    }
+
     // Check both instruction starts and interior bytes, so source lookup must
     // use line-table intervals instead of matching only exact DWARF row addresses.
     let addresses: Vec<_> = actual
