@@ -1,5 +1,9 @@
 # Timed decompiler checkpoint — 2026-10-01
 
+This is a historical handoff record. References to a running desktop window,
+an unpublished checkout, a time limit, or retained build artifacts describe the
+recorded session only. For current setup use the [README](../README.md).
+
 The user authorized work until 09:33 Pacific local time (PDT on this date).
 Stop at that boundary; do not automatically resume the broader goal afterward.
 The latest continuation adds checked mapped snapshots, a bounded optional native
@@ -56,9 +60,9 @@ unresolved Rizin 0.7 libraries. An opt-in pinned C++ Ghidra experiment verifies
 Java-free pseudocode/address-token mapping. No backend or system package was
 installed or changed. The experiment is not connected to the IDE yet.
 
-The feature changes are local until explicitly published. Keep the existing
-lockfile and target directory, inspect status before continuing, and retain the
-evidence boundary between automated tests, native acceptance and remote CI.
+At this checkpoint the feature changes were still local. The later draft PR
+published them. Retain the evidence boundary between automated tests, native
+acceptance and remote CI.
 
 ```sh
 cargo run --locked -p a-less-awful-editor

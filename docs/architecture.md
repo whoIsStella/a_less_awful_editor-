@@ -1,6 +1,11 @@
-# System Design
+# Editor architecture
 
-A Less Awful Editor is a local-first native IDE focused on speed, structural clarity, strong Git/debugging/terminal workflows, and minimal UI chrome.
+This page describes the checked-in architecture of A Less Awful Editor, also
+called NEW EDITOR / Minimal IDE. The single-file editor and systems workbench
+are one product and architecture, not separate forks. See
+[project state](project-state.md) for checkpoint and evidence boundaries.
+The older [design archive](design/ide-plan.md) is historical planning, not a
+current feature inventory.
 
 ## Implemented boundary
 
@@ -16,262 +21,53 @@ bounded x86 decoding and DWARF line maps. It has no GPUI, filesystem, or process
 operations. `ui::systems` renders bounded views of one selected file offset;
 `ui::systems_shell` owns binary/source lifecycle and independent dirty guards;
 `ui::systems_io` performs bounded reads, create-only exports and optional NASM
-assembly on background workers. Source metadata does not automatically open a
-file. A source-navigation action uses the existing guarded text-open workflow.
+assembly on background workers; `ui::systems_analysis` owns snapshot-bound
+background function/control-flow analysis; and `ui::systems_decompiler` owns the
+bounded optional external-worker lifecycle. Source metadata does not automatically
+open a file. A source-navigation action uses the guarded text-open workflow.
 
-This implementation does not yet provide decompilation, a persistent analysis
-database, control-flow recovery, or debugging. See [implemented systems behavior](systems-workbench.md)
+The implementation provides bounded direct control-flow recovery and optional
+native decompilation for its documented Linux x86-64 contract. It does not provide
+a persistent analysis database, indirect control-flow recovery, broad processor/
+ABI coverage, or debugging. See [implemented systems behavior](systems-workbench.md),
+[analysis evidence](analysis-validation.md), [decompiler evidence](decompiler-validation.md),
 and [full systems capability obligations](systems-capabilities.md).
 
-## Design goals
+## Built boundary
 
-- Native, GPU-rendered UI.
-- Editing must remain responsive even when optional subsystems fail or stall.
-- No account, collaboration, cloud-sync, subscription, or product-growth dependencies in the core.
-- Tree-sitter is a first-class structural subsystem, not just a syntax highlighter.
-- LSP and DAP are protocol clients; language servers and debug adapters remain external processes.
-- GPUI renders the editor but does not own the editor model.
-- The filesystem, Git, terminal, debugger, and code structure should feel integrated without making the interface visually busy.
+| Layer | Code | Owns |
+| --- | --- | --- |
+| Text model | `crates/editor-core` | Ropey text, cursor/selection, grapheme navigation, undo/redo, saved revisions, text snapshots |
+| Native view | `crates/editor-view` | GPUI input protocol, UTF-16 conversion, rendering and viewport geometry |
+| Binary/analysis model | `crates/systems-core` | Immutable snapshots, binary mappings, decoding, source maps, function candidates, control flow and references |
+| Application shell | `crates/ui` | Document coordination, dirty-state prompts, persistence, systems views, patch/export work, and external-worker coordination |
+| Startup | `crates/app` | Native application and window creation |
 
-## High-level architecture
+Both pure cores exclude GPUI. The boundary script checks Cargo's transitive
+dependency graph, rather than just inspecting imports.
 
-```mermaid
-flowchart TB
-    USER["User"]
+## File lifecycle
 
-    subgraph UI["GPUI — Native GPU Interface"]
-        SHELL["Workspace Shell<br/>Top Bar · Tabs · Status Bar"]
-        FILES["File Tree<br/>minimal + lazy"]
-        EDITOR["Editor View<br/>text · gutters · structural guides"]
-        OUTLINE["Outline / Structure"]
-        GITUI["Git Graph + Diff"]
-        DEBUGUI["Debugger"]
-        TERMUI["Terminal"]
-        PALETTE["Command Palette"]
-    end
+Opening a file performs bounded reads and strict UTF-8 validation before
+replacing the document. The current milestone accepts regular files up to
+16 MiB and rejects symlinks.
 
-    subgraph CORE["Rust Application Core"]
-        WORKSPACE["Workspace Manager"]
-        BUFFER["Editor Core<br/>rope · cursor · selection<br/>undo · viewport"]
-        COMMANDS["Command System"]
-        EVENTS["Event / State Bus"]
-        CONFIG["Small Local Config"]
-    end
+Saving captures a text snapshot and runs file work on the background executor.
+The coordinator records the revision actually saved, so edits made during I/O
+remain dirty. A pending close rechecks that state after completion.
 
-    subgraph STRUCTURE["Code Intelligence"]
-        TS["Tree-sitter"]
-        STRUCT["Structural Model<br/>scopes · symbols · folds"]
-        LSP["LSP Client"]
-        DIAG["Diagnostics / References<br/>Rename · Completion"]
-    end
+Disk-version comparisons detect many external changes. Conflict decisions,
+picker cancellation, and read/write errors retain the document. The final
+comparison and replacement are not atomic with respect to other writers;
+filesystem races and durability limits remain documented.
 
-    subgraph SERVICES["Local Services"]
-        FS["Filesystem Service<br/>watcher · lazy tree · ignore rules"]
-        SEARCH["Search / Index"]
-        GIT["Git Service<br/>status · stage · commits · graph"]
-        DAP["DAP Client"]
-        PTY["PTY / Process Manager"]
-    end
+See [implemented behavior and persistence limits](scratch-editor.md) and
+[the recorded native acceptance](single-file-validation.md).
 
-    subgraph EXTERNAL["External Processes"]
-        LS["Language Servers"]
-        DA["Debug Adapters"]
-        CLI["Shell / CLI Tools"]
-        GITCLI["git"]
-    end
+## Beyond this checkpoint
 
-    USER --> SHELL
-
-    SHELL --> FILES
-    SHELL --> EDITOR
-    SHELL --> OUTLINE
-    SHELL --> GITUI
-    SHELL --> DEBUGUI
-    SHELL --> TERMUI
-    SHELL --> PALETTE
-
-    EDITOR <--> BUFFER
-    PALETTE --> COMMANDS
-
-    BUFFER --> EVENTS
-    COMMANDS --> EVENTS
-    WORKSPACE --> EVENTS
-
-    EVENTS --> TS
-    TS --> STRUCT
-    STRUCT --> EDITOR
-    STRUCT --> OUTLINE
-
-    EVENTS --> LSP
-    LSP <--> LS
-    LSP --> DIAG
-    DIAG --> EDITOR
-
-    WORKSPACE <--> FS
-    FS --> FILES
-    FS --> SEARCH
-
-    GITUI <--> GIT
-    GIT <--> GITCLI
-
-    DEBUGUI <--> DAP
-    DAP <--> DA
-
-    TERMUI <--> PTY
-    PTY <--> CLI
-```
-
-## Architectural boundary
-
-The editor model must be independent from GPUI.
-
-```text
-                   a_less_awful_editor
-                          |
-           +--------------+--------------+
-           |                             |
-      PRODUCT LAYER                 ENGINE LAYER
-           |                             |
-         GPUI                           Rust
-           |                             |
-   +-------+--------+        +-----------+------------+
-   |       |        |        |           |            |
- Files   Editor    Git     Buffer    Workspace    Services
-          |                   |
-          +---------+---------+
-                    |
-              Structural Model
-                    |
-             +------+------+
-             |             |
-        Tree-sitter        LSP
-```
-
-`editor-core` owns text, selections, cursor state, undo/redo, viewport state, decorations, and edit operations. It must have no GPUI dependency.
-
-GPUI receives model state and renders it. If the UI framework ever becomes limiting, the renderer should be replaceable without rewriting the editor engine.
-
-## Structural model
-
-Tree-sitter feeds one shared structural representation used by every code-structure feature.
-
-```text
-Tree-sitter
-     |
-     v
-Structural Model
-     |
-     +-- Outline
-     +-- Breadcrumbs
-     +-- Sticky scopes
-     +-- Folding
-     +-- Scope connectors
-     +-- Structural selection
-```
-
-This avoids implementing each structural feature as an independent UI hack.
-
-## Editing hot path
-
-Typing must never wait for the LSP, Git, filesystem indexing, debugger state, or terminal processes.
-
-```text
-keypress
-   |
-   v
-Editor Core
-   |
-   +----------------> repaint changed region --------> GPU
-   |
-   v
-Rope mutation
-   |
-   v
-incremental Tree-sitter edit
-   |
-   v
-changed syntax/scopes only
-   |
-   +----------------> update structural guides
-   |
-   +----------------> update outline if necessary
-
-              asynchronously
-                    |
-                    v
-                   LSP
-                    |
-          diagnostics / semantics
-                    |
-                    v
-              decorate editor
-```
-
-## Failure isolation
-
-The editor remains usable when optional subsystems fail.
-
-- Language server crashes -> editing still works.
-- Git fails -> editing still works.
-- Debug adapter exits -> editing still works.
-- Indexer rebuilds -> editing still works.
-- Terminal process dies -> editing still works.
-
-This is a core invariant, not a later optimization.
-
-## Proposed crate layout
-
-```text
-a_less_awful_editor-/
-|
-+-- crates/
-|   +-- app/                 # startup + orchestration
-|   +-- ui/                  # GPUI shell/components
-|   +-- editor-core/         # text model; NO GPUI dependency
-|   +-- editor-view/         # GPUI renderer
-|   +-- workspace/           # projects + files
-|   +-- syntax/              # Tree-sitter
-|   +-- language/            # LSP
-|   +-- git/                 # Git model
-|   +-- debug/               # DAP
-|   +-- terminal/            # PTY
-|   +-- search/              # project search/index
-|   +-- config/              # intentionally small local config
-|
-+-- assets/
-+-- queries/                 # Tree-sitter queries
-+-- docs/
-|   +-- architecture.md
-|
-+-- Cargo.toml
-```
-
-## Initial technology choices
-
-| Concern | Direction |
-| --- | --- |
-| Application language | Rust |
-| Native UI | GPUI |
-| Text storage | Rope-based editor core |
-| Parsing / structure | Tree-sitter |
-| Language intelligence | LSP |
-| Debugging | DAP |
-| Terminal | Native PTY + GPU-rendered terminal view |
-| Git | Local Git integration with visual graph/diff/staging |
-| Configuration | Small local human-readable config |
-
-## Non-goals for the core
-
-The core does not require:
-
-- user accounts
-- collaboration
-- cloud workspaces
-- subscription state
-- remote containers
-- product chat
-- AI agents
-- extension marketplace
-- telemetry-driven UI clutter
-
-Those can only exist later as optional, isolated capabilities if they ever earn their complexity.
+Tree-sitter, LSP, DAP, project navigation, Git integration, and a terminal are
+design directions or placeholders. The checked-in analysis and decompiler paths
+are deliberately bounded and do not establish feature parity with a mature
+reverse-engineering platform. Consult the validation records before inferring
+native UI, operating-system, processor, ABI, or decompiler acceptance.
