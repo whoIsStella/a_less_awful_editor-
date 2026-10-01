@@ -1,12 +1,12 @@
 # A Less Awful Editor
 
-I wanted less bullshit between opening a file and understanding what is in it. A Less Awful Editor is a native Rust/GPUI editor project growing into a systems workbench: source, assembly, bytes, and patch/export tools in the same workspace.
+I wanted less in between opening a file and understanding what is in it. A Less Awful Editor is a native Rust/GPUI editor project growing into an optional systems workbench: source, assembly, bytes, and patch/export tools in the same workspace.
 
 **Working systems-workbench slice, unfinished IDE.** This checkout includes the
 interactive UTF-8 editor, file tabs, linked source/assembly/byte/control-flow
 views, binary metadata, bounded x86 analysis, patch preview/history, safe copy
 export, and an optional native decompiler worker with a linked pseudocode view.
-It is not a finished IDE or Ghidra replacement.
+It's is not a finished IDE or Ghidra replacement.. yet.
 
 NEW EDITOR, Minimal IDE, and A Less Awful Editor are this same project.
 NEW EDITOR is the authoritative project-state record.
