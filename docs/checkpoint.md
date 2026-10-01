@@ -1,3 +1,10 @@
+# Historical checkpoint: 2026-09-26
+
+This record describes the local single-file milestone before it was merged into
+`main` by PR #1. References below to a running desktop window, an unpushed
+checkout, or retained `target/` describe that session only. They are not current
+operating instructions. For current setup use the [README](../README.md).
+
 # Paused checkpoint — 2026-09-26
 
 The single-file persistence milestone is implemented on `feat/interactive-scratch`.
