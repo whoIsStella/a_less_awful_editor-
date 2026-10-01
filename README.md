@@ -1,113 +1,65 @@
 # A Less Awful Editor
 
-I wanted less in between opening a file and understanding what is in it. A Less Awful Editor is a native Rust/GPUI editor project growing into an optional systems workbench: source, assembly, bytes, and patch/export tools in the same workspace.
+A native, local-first text editor and binary workbench for programmers who want
+to edit source code and inspect compiled files in one workspace.
 
-**Working systems-workbench slice, unfinished IDE.** This checkout includes the
-interactive UTF-8 editor, file tabs, linked source/assembly/byte/control-flow
-views, binary metadata, bounded x86 analysis, patch preview/history, safe copy
-export, and an optional native decompiler worker with a linked pseudocode view.
-It's is not a finished IDE or Ghidra replacement.. yet.
+Edit UTF-8 text, follow machine instructions, inspect bytes and control flow,
+and preview binary patches before exporting a separate copy. Your text stays
+open when you switch to binary views. No account or cloud service is required.
 
-NEW EDITOR, Minimal IDE, and A Less Awful Editor are this same project.
-NEW EDITOR is the authoritative project-state record.
-[Checkpoint details and historical screenshot](docs/project-state.md).
+## What you can do
 
-Inspect a binary with **Ctrl+Shift+O**. Overview, x86/x86-64 assembly, bytes,
-symbols/strings, control flow, pseudocode, and DWARF source navigation share a
-file location. Instruction and byte patches are previewed, applied in memory,
-and exported to a **new** file. The text buffer survives switching views. See
-[controls and limits](docs/systems-workbench.md), [analysis evidence](docs/analysis-validation.md),
-[decompiler evidence](docs/decompiler-validation.md), and the
-[full capability contract](docs/systems-capabilities.md).
+- Open, edit, and save text with Unicode navigation, selection, clipboard, and undo/redo.
+- Inspect ELF, PE, and Mach-O files with linked assembly, bytes, symbols, and strings.
+- Explore x86/x86-64 functions and control-flow graphs, and navigate to source when DWARF information is available.
+- Preview instruction or byte edits, undo patches, and export to a new file without overwriting the original.
+- View recovered pseudocode for supported Linux x86-64 binaries with the optional native decompiler.
 
-The compact native UI uses file tabs, aligned instruction columns, a grouped hex
-grid and an inline command/patch area. Secondary controls live under Details;
-placeholder panels start hidden.
-
-The editor core has **no direct or transitive GPUI dependency**.
-The separate binary-analysis core has the same boundary.
-See [implemented behavior and limitations](docs/scratch-editor.md) and
-[local validation evidence](docs/single-file-validation.md).
-
-## What you can build from this checkout
-
-- A Ropey text model with grapheme-aware navigation, selection, clipboard,
-  undo/redo, and UTF-16 conversion at the native text-input boundary.
-- GPUI rendering and viewport/scroll behavior in a separate view crate.
-- Open, Save, and Save As with dirty-document decisions, captured save snapshots,
-  external-change checks, and background file operations.
-- Recoverable open/write failures that retain the current document.
-- Bounded binary inspection, function/control-flow analysis, patch/export tools,
-  and opt-in snapshot-bound native decompilation.
-- Dependency checks that keep GPUI out of both pure cores.
-
-The checked-in validation records separate local automated tests, native X11
-acceptance, independent toolchain oracles, and unverified platform/UI boundaries.
-They are local evidence, not passing remote CI or cross-platform acceptance.
+![Assembly view with linked binary navigation](docs/screenshots/workbench-assembly.png)
 
 ## Run
 
-Requires stable Rust, the checked-in lockfile, and GPUI's native dependencies:
+Requires stable Rust and the native libraries listed below. From the project folder:
 
 ```bash
 cargo run --locked -p a-less-awful-editor
 ```
 
-On Debian/Ubuntu-derived Linux systems:
+### Linux setup
+
+On Debian/Ubuntu-derived systems:
 
 ```bash
-sudo apt-get install build-essential clang cmake binutils nasm libasound2-dev \
+sudo apt-get install build-essential clang cmake libasound2-dev \
   libfontconfig-dev libglib2.0-dev libssl-dev libvulkan1 \
   libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
   xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 Use the portal backend appropriate to your desktop. Launch from a graphical
-session with D-Bus and a Vulkan-capable driver. The file picker reports failures
-without replacing the document. Build and run Cargo as your normal user; never
-run Cargo with `sudo`.
+session with D-Bus and a Vulkan-capable driver. Run Cargo as your normal user.
+If the file picker fails, check that your desktop portal is running.
 
-Instruction assembly optionally uses `/usr/bin/nasm` (Debian/Parrot package
-`nasm`). Inspection and byte patching work without it. The application passes one
-validated instruction directly to NASM, with no shell or target execution.
-GNU `binutils` and `cc` enable the independent ELF/DWARF oracle test; an explicit
-skip is reported if they are unavailable.
+Instruction assembly also requires `/usr/bin/nasm` (`sudo apt-get install nasm`).
+Inspection and byte patching work without it.
 
-## Architecture of this checkout
+## Start using it
 
-| Crate | Responsibility |
-| --- | --- |
-| `editor-core` | Rope, cursor/selection, history, text snapshots; no GPUI |
-| `editor-view` | Native input and rendering boundary |
-| `systems-core` | Pure binary metadata, decoding, source maps, and bounded analysis; no GPUI |
-| `ui` | Application shell, prompts, background persistence, systems views, and external-worker coordination |
-| `app` | Process startup and native window |
+- **Ctrl+O** opens text; **Ctrl+S** saves; **Ctrl+Shift+S** saves under another name.
+- **Ctrl+Shift+O** opens a binary for inspection.
+- **Ctrl+1** returns to your text; **Ctrl+2**, **Ctrl+3**, and **Ctrl+4** show binary overview, assembly, and bytes.
+- **Export copy** writes patched bytes to a new file.
 
-File I/O stays outside the pure text model. Saving a snapshot does not declare
-later edits saved; closing during a save rechecks the dirty state.
+Read the [text editing guide](docs/scratch-editor.md),
+[binary workbench guide](docs/systems-workbench.md), or
+[optional decompiler setup](tools/native-decompiler/README.md) for controls and supported inputs.
 
-## Verify
+## Practical limits
 
-```bash
-cargo fmt --all -- --check
-python3 scripts/check-editor-core-boundary.py
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo build --locked -p a-less-awful-editor
-```
+Text files must be regular UTF-8 files no larger than 16 MiB; binary inspection
+accepts files up to 64 MiB. Symlink paths are rejected. Overwriting existing text
+files is supported on Linux; use Save As to a new file on other systems.
 
-`cargo check` alone does not demonstrate application linking or a native launch.
-
-## Limits of this checkout
-
-Strict UTF-8 regular files up to 16 MiB; symlinks are rejected. Existing-file
-overwrite is intentionally Linux-only. The final external-change comparison
-still has a race with another writer; this is not a filesystem transaction.
-Power loss, full disks, network filesystems, macOS, Windows, Wayland, and native
-IME candidate selection are not covered by the recorded acceptance.
-
-[Implemented behavior](docs/scratch-editor.md) documents the details.
-[Architecture](docs/architecture.md) describes this milestone's built boundary.
-[Project state](docs/project-state.md) records the published checkpoints. The old
-[checkpoint](docs/checkpoint.md) is historical context, not a current instruction
-about a running desktop window.
+There is no integrated terminal, Git client, debugger, or syntax highlighting.
+Binary patches do not repair relocations, signatures, or checksums. Recovered
+pseudocode uses inferred names and types; it is not the original source.

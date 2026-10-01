@@ -1,7 +1,6 @@
 # Linked systems views
 
-The first systems-workstation slice extends the existing Rust/GPUI editor. The
-original text document and one binary snapshot coexist. Nothing imported is
+Keep a text document and a binary open together, and switch between their views. Nothing imported is
 executed, and the original binary is never a save destination.
 
 ## Controls
@@ -23,16 +22,14 @@ executed, and the original binary is never a save destination.
 | Apply / reverse patches | Apply patch / Undo / Redo |
 | Export | Export copy; choose a new path |
 
-On macOS the application shortcuts use Command. Native acceptance has only been
-performed on Linux; other platform behavior must be separately validated.
+On macOS the application shortcuts use Command.
 
 One file offset anchors Overview, Assembly, Flow, Bytes and Strings. Symbols, sections,
 branches and entropy bins navigate that location; Back restores earlier offsets.
 Assembly is a bounded linear decode, not recovered control flow. Next page moves
 through the file. Details reveals symbol visibility, A-/A+ binary font size, and
 8/16-byte row controls. These view choices currently last for the open binary,
-not across application restarts. Layout docking and keymap customization remain
-open requirements.
+not across application restarts. Layout docking and keymap customization are unavailable.
 
 ## Presentation
 
@@ -45,7 +42,7 @@ fixed-cell grid with an eight-byte group gap and a separate ASCII column.
 Go to, Find, Assemble and Patch bytes share a compact native command input.
 Previews remain inline and require Apply patch. Placeholder shell panels are
 hidden initially and available through Panels. Details holds secondary controls
-and complete messages. No layout/keymap persistence is implied by this restyling.
+and complete messages. View settings reset when you close the binary.
 
 ## Source correspondence
 
@@ -71,16 +68,14 @@ are parsed; malformed recognized images report errors. Other bytes remain raw.
 Sections and symbols carry distinct virtual addresses and file offsets. BSS,
 overlapping mappings, and unmapped bytes have no invented virtual address.
 Segment-only images are not mapped yet. Raw bytes require the explicit
-Interpret x86-64 action (base zero); broader raw processor/base controls remain
-outstanding. Other recognized architectures keep bytes/metadata available but
+Interpret x86-64 action (base zero); other raw processors and base addresses cannot be selected. Other recognized architectures keep bytes/metadata available but
 report unavailable disassembly.
 
-Assembly uses `iced-x86`; file parsing uses `object`; DWARF uses `gimli`. The
-display decodes at most 512 bytes/64 instructions and paints at most 64 byte rows.
+The display decodes at most 512 bytes/64 instructions and paints at most 64 byte rows.
 Metadata and DWARF extraction have separate resource limits and visible warnings.
 Search returns at most 128 matches, with the first 100,000 bounded printable ASCII
 strings scanned. Overview entropy is Shannon byte entropy, not proof that data
-is packed, encrypted or meaningful. No performance claim is made.
+is packed, encrypted or meaningful.
 
 NASM assembly supports a conservative list of common x86 instructions. It accepts
 one instruction, disables preprocessing, rejects directives/labels/macros, limits
@@ -111,10 +106,7 @@ dirty so the user can recover deliberately.
 Reads compare metadata before and after bounded I/O. These checks are not a
 transaction against concurrent writers and do not prevent all ancestor-directory
 replacement races. There is no power-loss, network-filesystem, or adversarial
-parser sandbox guarantee. Parsing, search, entropy, patch reparsing, file I/O and
-assembly run off the UI thread; bounded decoding and navigation run in the view.
-General worker cancellation, worker-process isolation and analysis persistence
-remain obligations in the [full capability contract](systems-capabilities.md).
+parser sandbox guarantee. Analysis is not saved between sessions.
 
 ## Function analysis and Flow
 
@@ -125,9 +117,8 @@ symbols; graph instructions, edge destinations, and the References list navigate
 the same location used by Assembly, Bytes and Source. References include direct
 branches/calls and explicitly unresolved indirect transfers.
 
-Analysis runs on an immutable snapshot in the background. Apply, undo and redo
-invalidate and rebuild it; cancellation and generation/revision checks prevent a
-late result from replacing newer state. Raw bytes, ambiguous mappings and other
+Analysis runs in the background. Applying, undoing, or redoing a patch refreshes
+the analysis to match the displayed bytes. Raw bytes, ambiguous mappings and other
 architectures report unsupported analysis rather than guessing executable code.
 Defaults bound work to 128 functions, 4,096 blocks, 100,000 instruction rows and
 8 MiB of decoded bytes. Shared tails count against each function's row budget.
@@ -136,9 +127,8 @@ opens the full linear view. The reference list displays at most 256 matches.
 
 This is candidate recovery, not proof of code/data separation or full program
 semantics. Indirect target recovery, exception flow, data references and user
-function definitions remain open. Graph routes can overlap and function membership
-can be ambiguous for shared tails. The optional native decompiler now connects to the Pseudocode tab; its broader
-processor and program-model coverage remains unfinished.
+function definitions are unavailable. Graph routes can overlap and function membership
+can be ambiguous for shared tails. The optional native decompiler now connects to the Pseudocode tab; it supports the inputs listed below.
 
 ## Optional pseudocode
 
@@ -149,6 +139,5 @@ the full recovered result. Cancel retains the document. New bytes or a different
 function clear the old pseudocode. Missing configuration and unsupported inputs
 show recoverable explanations. Names and types are inferred, not original source.
 
-See [worker setup](../tools/native-decompiler/README.md) and
-[validation and limits](decompiler-validation.md). Linux ELF64/x86-64 is the initial
-contract; this does not establish broad decompiler parity or native visual acceptance.
+See [worker setup and input limits](../tools/native-decompiler/README.md).
+Pseudocode is supported for Linux ELF64 little-endian x86-64 executables and shared objects.
