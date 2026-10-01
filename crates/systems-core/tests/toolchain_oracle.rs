@@ -341,7 +341,7 @@ fn compiled_elf_matches_readelf_objdump_and_addr2line() {
     let oracle_lines: Vec<_> = locations.lines().collect();
     assert_eq!(oracle_lines.len(), addresses.len() * 2);
     let mut observed_lines = std::collections::BTreeSet::new();
-    for (address, oracle) in addresses.iter().zip(oracle_lines.chunks_exact(2)) {
+    for (address, oracle) in addresses.iter().zip(oracle_lines.as_chunks::<2>().0) {
         assert_eq!(oracle[0], "inspected_fixture");
         let (path, line) = oracle[1].rsplit_once(':').unwrap();
         let line = line
