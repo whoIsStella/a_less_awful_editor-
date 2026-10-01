@@ -1,7 +1,11 @@
 # Editor architecture
 
-This page describes the checked-in single-file editor. The wider IDE design is
-kept in [the design archive](design/ide-plan.md); it is not a feature inventory.
+This page describes the checked-in single-file milestone of A Less Awful
+Editor, also called NEW EDITOR / Minimal IDE. The later local systems workbench
+is the same product and architecture, not a separate fork. See
+[project state](project-state.md) for its reported checkpoint and publication gap.
+The older [design archive](design/ide-plan.md) is historical planning, not a
+current feature inventory.
 
 ## Built boundary
 
@@ -33,9 +37,11 @@ filesystem races and durability limits remain documented.
 See [implemented behavior and persistence limits](scratch-editor.md) and
 [the recorded native acceptance](single-file-validation.md).
 
-## Unimplemented subsystems
+## Beyond this checkout
 
 Tree-sitter, LSP, DAP, project navigation, Git integration, and a terminal are
-design directions or placeholders. Binary analysis, linked binary views,
-control-flow analysis, decompilation, and an export workspace are absent from
-this repository's inspected branches.
+design directions or placeholders in this milestone. The inspected remote
+branches do not contain the later local binary views, linked locations, patch
+history, and copy-export work. Their absence here does not mean the wider
+project stopped at single-file editing. The analysis/decompiler integration
+is still separate unverified WIP; do not infer a working product decompiler.

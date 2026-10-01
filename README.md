@@ -1,13 +1,19 @@
 # A Less Awful Editor
 
-I wanted an editor with less bullshit between opening a file and changing it. The current implementation is a native Rust/GPUI single-file editor; the part I care most about is keeping text state independent of the UI and making failed saves recoverable.
+I wanted less bullshit between opening a file and understanding what is in it. A Less Awful Editor is a native Rust/GPUI editor project growing into a systems workbench: source, assembly, bytes, and patch/export tools in the same workspace.
 
-**Working editor foundation, unfinished IDE.** It edits and saves UTF-8 files.
-Project navigation, terminal, diagnostics, Git, and debugging are placeholders.
-There are no implemented binary views, parser, control-flow analysis, decompiler,
-linked analysis views, or export workspace in this checkout.
+**Unfinished; this GitHub checkout is behind the local workbench milestone.**
+You can build the single-file UTF-8 editor here. The later local checkpoint
+reports linked source/assembly/byte views, x86 decoding, patch previews, and
+safe copy export, with 76 tests and native acceptance. That source is not yet
+on the inspected remote branches; those results have not been rerun here.
+The decompiler integration remains separate, unverified work in progress.
 
-## What is real
+NEW EDITOR, Minimal IDE, and A Less Awful Editor refer to this same project.
+[Checkpoint details and the historical screenshot](docs/project-state.md)
+explain what is available in this checkout and what still needs publishing.
+
+## What you can build from this checkout
 
 - A Ropey text model with grapheme-aware navigation, selection, clipboard,
   undo/redo, and UTF-16 conversion at the native text-input boundary.
@@ -42,7 +48,7 @@ Use the portal backend appropriate to your desktop. Launch from a graphical
 session with D-Bus and a Vulkan-capable driver. The file picker reports failures
 without replacing the document. Build and run Cargo as your normal user.
 
-## Architecture
+## Architecture of this checkout
 
 | Crate | Responsibility |
 | --- | --- |
@@ -66,7 +72,7 @@ cargo build --locked -p a-less-awful-editor
 
 `cargo check` alone does not demonstrate application linking or a native launch.
 
-## Limits worth reading
+## Limits of this checkout
 
 Strict UTF-8 regular files up to 16 MiB; symlinks are rejected. Existing-file
 overwrite is intentionally Linux-only. The final external-change comparison
@@ -75,6 +81,6 @@ Power loss, full disks, network filesystems, macOS, Windows, Wayland, and native
 IME candidate selection are not covered by the recorded acceptance.
 
 [Implemented behavior](docs/scratch-editor.md) documents the details.
-[Architecture](docs/architecture.md) separates the built boundary from future
-Tree-sitter/LSP/DAP/terminal ideas. The old [checkpoint](docs/checkpoint.md)
+[Architecture](docs/architecture.md) describes this milestone's built boundary.
+[Project state](docs/project-state.md) records the later workbench checkpoint. The old [checkpoint](docs/checkpoint.md)
 is historical context, not a current instruction about a running desktop window.
