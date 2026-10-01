@@ -1,17 +1,18 @@
 # Project state and screenshot provenance
 
 NEW EDITOR, Minimal IDE, and A Less Awful Editor are names for one project.
-NEW EDITOR is the authoritative project-state record. Its September 30
-reconciliation establishes the systems workbench as the current verified
-application slice. The older GitHub snapshot does not supersede that state.
+NEW EDITOR is the authoritative project-state record. The systems workbench,
+control-flow analysis, and optional decompiler integration are published in
+draft PR #5; evidence remains bounded by the validation records below.
 
 ## Checkpoints
 
 | State | Branch / commit | Evidence |
 | --- | --- | --- |
-| Single-file foundation available here | Original main milestone `4db630bfdaef06bcd70e561398e0194517df3c39` | Source inspected; checked-in record reports 35 tests and Linux X11 native acceptance |
-| Current verified systems workbench | `codex/systems-workbench`, `4e9ffe3` | Authoritative NEW EDITOR record: 76 passing tests and native acceptance at the paused checkpoint; not rerun during this documentation task |
-| Isolated analysis integration WIP | `codex/analysis-wip-20260927`, `f159826a327c476e5acc4bcf19798b19be375346` | Uncompiled and untested Rust analysis draft; separate native typed-decompiler fixture evidence is not proof of editor integration |
+| Single-file foundation | Main milestone `4db630bfdaef06bcd70e561398e0194517df3c39` | Checked-in record reports 35 tests and Linux X11 native acceptance |
+| Systems workbench | PR #5 history through `4e9ffe3` | Checked-in record reports 76 tests plus native export/reopen and dirty-close acceptance |
+| Control-flow analysis | PR #5 checkpoint `22515fb` | Checked-in record reports 85 tests, independent toolchain checks, and bounded native graph acceptance |
+| Optional decompiler integration | PR #5 checkpoint `37d1d1f` | Checked-in record reports 90 tests with the configured worker and real-worker state coverage; native pseudocode-view acceptance remains open |
 
 The current verified workbench slice includes file tabs, linked source/assembly/byte
 locations, binary metadata, x86 decoding, aligned assembly/hex views,
@@ -19,18 +20,15 @@ patch preview/history, safe copy export, and separate text/binary dirty-close
 decisions. The recorded native acceptance includes exact export/reopen checks,
 compact and zoomed layouts, cancellation, and clean/approved close.
 
-The local validation document is named `docs/systems-validation.md`; the WIP
-handoff is `docs/analysis-wip.md`. Neither is present on the inspected remote
-branches. The September 30 reconciliation did not rerun validation or inspect
-local git status. The short application commit did not resolve through this
-repository's GitHub commit API during the October 1 audit.
+The validation records are `docs/single-file-validation.md`,
+`docs/systems-validation.md`, `docs/analysis-validation.md`, and
+`docs/decompiler-validation.md`. They distinguish automated, native, oracle,
+and unverified evidence; publication does not strengthen those claims.
 
-The workbench merits flagship consideration. To make that work visible on
-GitHub, publish the verified application checkpoint and its validation record,
-preserving the separate WIP branch.
 Do not substitute these notes for runnable source. IME, other OS/Wayland paths,
 durability, and filesystem races remain unverified; the record does not prove
-a finished decompiler or a universal workspace backend.
+a finished decompiler, broad processor/ABI coverage, or a universal workspace
+backend.
 
 ## Historical screenshot
 

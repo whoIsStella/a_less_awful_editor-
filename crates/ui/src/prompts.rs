@@ -1,8 +1,8 @@
 //! Small Linux fallback: GPUI 0.2.2's default clips long details and lacks
 //! keyboard dismissal. Other platforms retain their native prompts.
 use gpui::{
-    App, AppContext, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    PromptButton, PromptResponse, Render, Window, div, prelude::*, px, rgb,
+    App, AppContext, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
+    KeyDownEvent, PromptButton, PromptResponse, Render, Window, div, prelude::*, px, rgb,
 };
 
 pub fn init(cx: &mut App) {
@@ -67,55 +67,111 @@ impl Render for Confirmation {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000088))
+            .p_4()
+            .bg(gpui::rgba(0x101216b8))
             .child(
                 div()
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::key))
-                    .w(px(520.0))
+                    .w(px(400.0))
                     .max_w_full()
                     .max_h_full()
                     .overflow_hidden()
-                    .p_4()
+                    .p_5()
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .bg(rgb(0x1b2029))
-                    .text_color(rgb(0xd8dee9))
+                    .bg(rgb(0x1b2028))
+                    .text_color(rgb(0xd4dce7))
                     .border_1()
-                    .border_color(rgb(0x56657c))
+                    .border_color(rgb(0x2a313c))
                     .rounded_lg()
-                    .child(div().whitespace_normal().child(self.message.clone()))
+                    .shadow_lg()
                     .child(
                         div()
-                            .id("confirmation-detail")
-                            .max_h(px(140.0))
-                            .overflow_y_scroll()
-                            .text_sm()
+                            .flex_shrink_0()
+                            .text_size(px(16.0))
+                            .line_height(px(22.0))
+                            .font_weight(FontWeight::MEDIUM)
                             .whitespace_normal()
-                            .child(self.detail.clone()),
+                            .child(self.message.clone()),
                     )
-                    .children(self.answers.iter().enumerate().map(|(index, answer)| {
+                    .when(!self.detail.is_empty(), |card| {
+                        card.child(
+                            div()
+                                .id("confirmation-detail")
+                                .min_h_0()
+                                .max_h(px(140.0))
+                                .overflow_y_scroll()
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(rgb(0x8590a3))
+                                .whitespace_normal()
+                                .child(self.detail.clone()),
+                        )
+                    })
+                    .child(
                         div()
-                            .id(index)
-                            .px_3()
-                            .py_2()
-                            .text_sm()
-                            .cursor_pointer()
-                            .border_1()
-                            .border_color(rgb(if index == self.selected {
-                                0x90b4ed
-                            } else {
-                                0x39414f
-                            }))
-                            .child(answer.label().clone())
-                            .on_click(
-                                cx.listener(move |_, _, _, cx| cx.emit(PromptResponse(index))),
-                            )
-                    })),
+                            .flex()
+                            .flex_wrap()
+                            .flex_shrink_0()
+                            .justify_end()
+                            .gap_2()
+                            .pt_1()
+                            .children(self.answers.iter().enumerate().map(|(index, answer)| {
+                                let primary = matches!(answer, PromptButton::Ok(_));
+                                let danger = matches!(answer, PromptButton::Other(_));
+                                let selected = index == self.selected;
+                                div()
+                                    .id(index)
+                                    .min_w(px(64.0))
+                                    .min_h(px(30.0))
+                                    .px_3()
+                                    .py_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(12.0))
+                                    .line_height(px(18.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
+                                    .cursor_pointer()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(match (selected, primary) {
+                                        (true, true) => 0xd4dce7,
+                                        (true, false) | (false, true) => 0x7aa2f7,
+                                        (false, false) => 0x2a313c,
+                                    }))
+                                    .bg(rgb(if primary { 0x7aa2f7 } else { 0x1b2028 }))
+                                    .text_color(rgb(if primary {
+                                        0x101216
+                                    } else if danger {
+                                        0xe06c75
+                                    } else if selected {
+                                        0xd4dce7
+                                    } else {
+                                        0x8590a3
+                                    }))
+                                    .hover(move |style| {
+                                        style
+                                            .bg(rgb(if primary { 0x7aa2f7 } else { 0x2a313c }))
+                                            .border_color(rgb(if danger {
+                                                0xe06c75
+                                            } else {
+                                                0x7aa2f7
+                                            }))
+                                    })
+                                    .child(answer.label().clone())
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(PromptResponse(index));
+                                    }))
+                            })),
+                    ),
             )
     }
 }

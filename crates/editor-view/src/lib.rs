@@ -12,11 +12,16 @@ use gpui::{
     div, fill, point, prelude::*, px, relative, rgb, size,
 };
 
-const LINE_HEIGHT: f32 = 23.0;
-const GUTTER: f32 = 64.0;
+const LINE_HEIGHT: f32 = 21.0;
+const GUTTER: f32 = 56.0;
+
+/// Emitted by compact command inputs when Enter is pressed outside composition.
+pub struct Submit;
+impl gpui::EventEmitter<Submit> for EditorView {}
 
 pub struct EditorView {
     buffer: EditorBuffer,
+    gutter: f32,
     focus: FocusHandle,
     marked: Option<Range<usize>>,
     rows: Vec<VisualLine>,
@@ -31,6 +36,7 @@ impl EditorView {
     pub fn new(text: &str, cx: &mut Context<Self>) -> Self {
         Self {
             buffer: EditorBuffer::with_text(text),
+            gutter: GUTTER,
             focus: cx.focus_handle(),
             marked: None,
             rows: Vec::new(),
@@ -42,8 +48,31 @@ impl EditorView {
         }
     }
 
+    /// Reuse the native editor input path for compact workstation command fields.
+    pub fn input(text: &str, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(text, cx);
+        view.gutter = 0.0;
+        view
+    }
+
+    pub fn text(&self) -> String {
+        self.buffer
+            .text_in_range(0..self.buffer.len_chars())
+            .unwrap_or_default()
+    }
+
+    pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.finish_composition();
+        self.buffer.move_to(self.buffer.line_start(line), false);
+        self.changed(cx);
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.buffer.is_dirty()
+    }
+
+    pub fn content_revision(&self) -> u64 {
+        self.buffer.content_revision()
     }
 
     pub fn save_snapshot(&mut self) -> TextSnapshot {
@@ -85,6 +114,11 @@ impl EditorView {
         let modifiers = event.keystroke.modifiers;
         let command = modifiers.secondary();
         if modifiers.alt {
+            return;
+        }
+        if self.gutter == 0.0 && key == "enter" && self.marked.is_none() {
+            cx.emit(Submit);
+            cx.stop_propagation();
             return;
         }
         let movement = match (command, key) {
@@ -229,10 +263,10 @@ impl Render for EditorView {
             } else {
                 "DejaVu Sans Mono"
             })
-            .text_size(px(14.0))
+            .text_size(px(13.0))
             .line_height(px(LINE_HEIGHT))
-            .text_color(rgb(0xd8dee9))
-            .bg(rgb(0x111318))
+            .text_color(rgb(0xd4dce7))
+            .bg(rgb(0x101216))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
@@ -488,7 +522,12 @@ impl Element for EditorElement {
                 let run = TextRun {
                     len: label.len(),
                     font: style.font(),
-                    color: rgb(0x747e90).into(),
+                    color: rgb(if index == editor.buffer.cursor().line {
+                        0x7aa2f7
+                    } else {
+                        0x596579
+                    })
+                    .into(),
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -502,7 +541,7 @@ impl Element for EditorElement {
                     number,
                     byte_offsets,
                     origin: point(
-                        bounds.left() + px(GUTTER),
+                        bounds.left() + px(editor.gutter),
                         bounds.top() + px(index as f32 * LINE_HEIGHT - editor.scroll_y),
                     ),
                 });
@@ -514,7 +553,7 @@ impl Element for EditorElement {
                     .find(|row| head >= row.start && head <= row.end())
                 {
                     let x = f32::from(row.x_for_offset(head) - row.origin.x);
-                    let width = (f32::from(bounds.size.width) - GUTTER - 8.0).max(1.0);
+                    let width = (f32::from(bounds.size.width) - editor.gutter - 8.0).max(1.0);
                     if x < editor.scroll_x {
                         editor.scroll_x = x;
                     }
@@ -527,7 +566,7 @@ impl Element for EditorElement {
                 .iter()
                 .map(|row| f32::from(row.x_for_offset(row.end()) - row.origin.x))
                 .fold(0.0_f32, f32::max);
-            let width = (f32::from(bounds.size.width) - GUTTER - 8.0).max(1.0);
+            let width = (f32::from(bounds.size.width) - editor.gutter - 8.0).max(1.0);
             editor.scroll_x = editor.scroll_x.clamp(0.0, (widest - width).max(0.0));
             for row in &mut rows {
                 row.origin.x -= px(editor.scroll_x);
@@ -548,12 +587,13 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus, selection, marked) = {
+        let (focus, selection, marked, gutter) = {
             let editor = self.editor.read(cx);
             (
                 editor.focus.clone(),
                 editor.buffer.selection(),
                 editor.marked.clone(),
+                editor.gutter,
             )
         };
         window.handle_input(
@@ -563,9 +603,9 @@ impl Element for EditorElement {
         );
         let range = selection.range();
         let text_bounds = Bounds::new(
-            point(bounds.left() + px(GUTTER), bounds.top()),
+            point(bounds.left() + px(gutter), bounds.top()),
             size(
-                px((f32::from(bounds.size.width) - GUTTER).max(0.0)),
+                px((f32::from(bounds.size.width) - gutter).max(0.0)),
                 bounds.size.height,
             ),
         );
@@ -575,6 +615,20 @@ impl Element for EditorElement {
             }),
             |window| {
                 for row in rows.iter() {
+                    if gutter > 0.0
+                        && range.is_empty()
+                        && focus.is_focused(window)
+                        && selection.head >= row.start
+                        && selection.head <= row.end()
+                    {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(text_bounds.left(), row.origin.y),
+                                size(text_bounds.size.width, px(LINE_HEIGHT)),
+                            ),
+                            rgb(0x141a23),
+                        ));
+                    }
                     if range.start <= row.end() && range.end > row.start {
                         let x1 = row.x_for_offset(range.start.max(row.start));
                         let mut x2 = row.x_for_offset(range.end.min(row.end()));
@@ -586,7 +640,7 @@ impl Element for EditorElement {
                                 point(x1, row.origin.y),
                                 size(px(f32::from(x2 - x1).max(1.0)), px(LINE_HEIGHT)),
                             ),
-                            rgb(0x304466),
+                            rgb(0x273b59),
                         ));
                     }
                     if let Err(error) = row.text.paint(row.origin, px(LINE_HEIGHT), window, cx) {
@@ -615,13 +669,13 @@ impl Element for EditorElement {
                                 point(row.x_for_offset(selection.head), row.origin.y + px(2.0)),
                                 size(px(2.0), px(LINE_HEIGHT - 4.0)),
                             ),
-                            rgb(0xa8c8ff),
+                            rgb(0x7aa2f7),
                         ));
                     }
                 }
             },
         );
-        let gutter_bounds = Bounds::new(bounds.origin, size(px(GUTTER), bounds.size.height));
+        let gutter_bounds = Bounds::new(bounds.origin, size(px(gutter), bounds.size.height));
         window.with_content_mask(
             Some(ContentMask {
                 bounds: gutter_bounds,

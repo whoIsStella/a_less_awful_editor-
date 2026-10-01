@@ -1,5 +1,9 @@
+mod decompiler;
 mod persistence;
 pub mod prompts;
+mod systems;
+mod systems_io;
+mod systems_shell;
 
 use ale_editor_core::TextSnapshot;
 use ale_editor_view::EditorView;
@@ -9,11 +13,29 @@ use gpui::{
 };
 use persistence::{DiskVersion, Loaded, SaveError};
 use std::path::PathBuf;
+use systems::{Lens, Workbench};
+use systems_shell::BinaryIntent;
 
-actions!(document, [Open, Save, SaveAs, Close, Quit]);
+actions!(
+    document,
+    [
+        Open,
+        Save,
+        SaveAs,
+        Close,
+        Quit,
+        InspectBinary,
+        ShowEditor,
+        ShowAssembly,
+        ShowBytes,
+        ShowOverview,
+        TogglePanels
+    ]
+);
 
 enum Intent {
     Open(Box<Loaded>),
+    Source(Box<Loaded>, usize),
     Close,
 }
 
@@ -55,6 +77,12 @@ pub struct AppShell {
     busy: bool,
     pending: Option<Intent>,
     status: String,
+    workbench: Option<Entity<Workbench>>,
+    systems_active: bool,
+    panels_visible: bool,
+    binary_pending: Option<BinaryIntent>,
+    close_text_revision: Option<u64>,
+    close_binary_revision: Option<(gpui::EntityId, u64)>,
 }
 
 impl AppShell {
@@ -64,9 +92,17 @@ impl AppShell {
         cx.observe(&editor, |_, _, cx| cx.notify()).detach();
         let shell = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
-            let _ = shell.update(cx, |this, cx| {
-                this.request_replace(Intent::Close, window, cx)
-            });
+            // GPUI 0.2.2's X11 close callback still holds the platform state
+            // borrow. Quit (and prompts) must run after that callback unwinds;
+            // defer() would flush inside the same update and is too early.
+            let shell = shell.clone();
+            window
+                .spawn(cx, async move |cx| {
+                    let _ = shell.update_in(cx, |this, window, cx| {
+                        this.request_replace(Intent::Close, window, cx)
+                    });
+                })
+                .detach();
             false
         });
         Self {
@@ -77,18 +113,27 @@ impl AppShell {
             busy: false,
             pending: None,
             status: "Untitled - not saved to disk".into(),
+            workbench: None,
+            systems_active: false,
+            panels_visible: false,
+            binary_pending: None,
+            close_text_revision: None,
+            close_binary_revision: None,
         }
     }
 
     fn finish(&mut self, message: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.busy = false;
         self.status = message.into();
-        self.editor.read(cx).focus_handle(cx).focus(window);
+        self.focus_active(window, cx);
         cx.notify();
     }
 
     fn cancel(&mut self, message: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.pending = None;
+        self.binary_pending = None;
+        self.close_text_revision = None;
+        self.close_binary_revision = None;
         self.finish(message, window, cx);
     }
 
@@ -149,7 +194,13 @@ impl AppShell {
         if self.busy {
             return;
         }
-        if !self.editor.read(cx).is_dirty() {
+        let close_approved = matches!(intent, Intent::Close)
+            && self.close_text_revision == Some(self.editor.read(cx).content_revision());
+        if !matches!(intent, Intent::Close) {
+            self.close_text_revision = None;
+            self.close_binary_revision = None;
+        }
+        if !self.editor.read(cx).is_dirty() || close_approved {
             self.apply_intent(intent, window, cx);
             return;
         }
@@ -185,8 +236,16 @@ impl AppShell {
 
     fn apply_intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
-            Intent::Close => cx.quit(),
-            Intent::Open(loaded) => {
+            Intent::Close => {
+                self.close_text_revision = Some(self.editor.read(cx).content_revision());
+                self.request_binary_replace(BinaryIntent::Close, window, cx);
+            }
+            Intent::Open(_) | Intent::Source(_, _) => {
+                let (loaded, line) = match intent {
+                    Intent::Open(loaded) => (loaded, None),
+                    Intent::Source(loaded, line) => (loaded, Some(line)),
+                    Intent::Close => unreachable!(),
+                };
                 let Loaded {
                     path,
                     buffer,
@@ -195,6 +254,11 @@ impl AppShell {
                 self.path = Some(path);
                 self.disk = Some(version);
                 self.editor.update(cx, |editor, cx| editor.load(buffer, cx));
+                if let Some(line) = line {
+                    self.editor
+                        .update(cx, |editor, cx| editor.go_to_line(line, cx));
+                }
+                self.systems_active = false;
                 self.finish("Opened", window, cx);
             }
         }
@@ -278,7 +342,10 @@ impl AppShell {
                                 Intent::Open(loaded) => {
                                     // A save may have changed the very file being opened.
                                     // Refresh it, then recheck edits made during either I/O.
-                                    this.reload_for_open(loaded.path, window, cx);
+                                    this.reload_for_open(loaded.path, None, window, cx);
+                                }
+                                Intent::Source(loaded, line) => {
+                                    this.reload_for_open(loaded.path, Some(line), window, cx)
                                 }
                                 Intent::Close => this.request_replace(Intent::Close, window, cx),
                             }
@@ -296,7 +363,13 @@ impl AppShell {
         .detach();
     }
 
-    fn reload_for_open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    fn reload_for_open(
+        &mut self,
+        path: PathBuf,
+        line: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.busy = true;
         let work = cx
             .background_executor()
@@ -306,7 +379,14 @@ impl AppShell {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok(loaded) => this.request_replace(Intent::Open(Box::new(loaded)), window, cx),
+                    Ok(loaded) => this.request_replace(
+                        match line {
+                            Some(line) => Intent::Source(Box::new(loaded), line),
+                            None => Intent::Open(Box::new(loaded)),
+                        },
+                        window,
+                        cx,
+                    ),
                     Err(error) => {
                         this.failure(format!("Open failed after save: {error}"), window, cx)
                     }
@@ -344,14 +424,44 @@ impl AppShell {
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let position = self.editor.read(cx).cursor();
-        let dirty = self.editor.read(cx).is_dirty();
-        let path = self
+        let text_dirty = self.editor.read(cx).is_dirty();
+        let text_name = self
             .path
             .as_ref()
-            .map(|p| p.display().to_string())
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
-        let label = format!("{}{}", if dirty { "* " } else { "" }, path);
-        window.set_window_title(&format!("A Less Awful Editor - {label}"));
+        let binary = self.workbench.as_ref().map(|workbench| {
+            let workbench = workbench.read(cx);
+            let name = workbench
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| workbench.path.display().to_string());
+            (name, workbench.is_dirty(), workbench.offset)
+        });
+        let (active_name, active_dirty, location) = if self.systems_active {
+            let (name, dirty, offset) = binary.as_ref().expect("active systems view");
+            (name.clone(), *dirty, format!("File offset {offset:#x}"))
+        } else {
+            (
+                text_name.clone(),
+                text_dirty,
+                format!("Ln {}, Col {}", position.line + 1, position.column + 1),
+            )
+        };
+        window.set_window_title(&format!(
+            "A Less Awful Editor - {}{}",
+            active_name,
+            if active_dirty { " *" } else { "" }
+        ));
+        // Keep room for the binary command bar, an expanded Details section,
+        // and several data rows when the optional placeholder panel is open.
+        let panel_height = if self.systems_active {
+            (window.viewport_size().height - px(420.0)).clamp(px(28.0), px(104.0))
+        } else {
+            px(104.0)
+        };
         let tabs = [
             Panel::Terminal,
             Panel::Problems,
@@ -361,6 +471,12 @@ impl Render for AppShell {
         .into_iter()
         .map(|panel| {
             let active = panel == self.panel;
+            let label = match panel {
+                Panel::Terminal => "Terminal",
+                Panel::Problems => "Problems",
+                Panel::Debug => "Debug",
+                Panel::Output => "Output",
+            };
             div()
                 .id(panel.label())
                 .px_3()
@@ -368,10 +484,11 @@ impl Render for AppShell {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .text_color(rgb(if active { 0xd8dee9 } else { 0x747e90 }))
+                .text_size(px(11.0))
+                .text_color(rgb(if active { 0xd4dce7 } else { 0x8590a3 }))
                 .border_b_1()
-                .border_color(rgb(if active { 0x90b4ed } else { 0x101217 }))
-                .child(panel.label())
+                .border_color(rgb(if active { 0x7aa2f7 } else { 0x15191f }))
+                .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.panel = panel;
                     cx.notify();
@@ -379,35 +496,172 @@ impl Render for AppShell {
         });
         div()
             .on_action(cx.listener(|this, _: &Open, window, cx| this.request_open(window, cx)))
-            .on_action(cx.listener(|this, _: &Save, window, cx| this.request_save(false, window, cx)))
-            .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.request_save(true, window, cx)))
-            .on_action(cx.listener(|this, _: &Close, window, cx| this.request_replace(Intent::Close, window, cx)))
-            .on_action(cx.listener(|this, _: &Quit, window, cx| this.request_replace(Intent::Close, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &Save, window, cx| this.save_active(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SaveAs, window, cx| this.save_active(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &InspectBinary, window, cx| this.request_inspect(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ShowEditor, window, cx| this.show_editor(window, cx)))
+            .on_action(cx.listener(|this, _: &ShowAssembly, window, cx| {
+                this.show_systems(Lens::Assembly, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowBytes, window, cx| {
+                this.show_systems(Lens::Bytes, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowOverview, window, cx| {
+                this.show_systems(Lens::Overview, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TogglePanels, _, cx| {
+                this.panels_visible = !this.panels_visible;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Close, window, cx| {
+                this.request_replace(Intent::Close, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                this.request_replace(Intent::Close, window, cx)
+            }))
             .flex()
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(0x0e1014))
-            .text_color(rgb(0xcfd5df))
+            .font_family("Inter")
+            .text_size(px(12.0))
+            .bg(rgb(0x101216))
+            .text_color(rgb(0xd4dce7))
             .child(
                 div()
-                    .h(px(36.0))
+                    .h(px(28.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .px_3()
+                    .gap_1()
                     .border_b_1()
-                    .border_color(rgb(0x292d36))
-                    .bg(rgb(0x15181e))
-                    .text_sm()
-                    .child("A Less Awful Editor  /  Open Ctrl+O  /  Save Ctrl+S  /  Save As Ctrl+Shift+S"),
+                    .border_color(rgb(0x2a313c))
+                    .bg(rgb(0x15191f))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x8590a3))
+                            .child("A Less Awful Editor"),
+                    )
+                    .child(
+                        systems::button("Open").on_click(
+                            cx.listener(|this, _, window, cx| this.request_open(window, cx)),
+                        ),
+                    )
+                    .child(systems::button("Inspect").on_click(
+                        cx.listener(|this, _, window, cx| this.request_inspect(window, cx)),
+                    ))
+                    .child(systems::button("Save").on_click(
+                        cx.listener(|this, _, window, cx| this.save_active(false, window, cx)),
+                    ))
+                    .child(
+                        systems::button("Panels")
+                            .when(self.panels_visible, |button| {
+                                button.bg(rgb(0x1b2028)).text_color(rgb(0xd4dce7))
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.panels_visible = !this.panels_visible;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(30.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .border_b_1()
+                    .border_color(rgb(0x2a313c))
+                    .bg(rgb(0x15191f))
+                    .child(
+                        div()
+                            .id("text-document-tab")
+                            .h_full()
+                            .min_w_0()
+                            .max_w(px(240.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .border_b_1()
+                            .border_color(rgb(0x2a313c))
+                            .text_color(rgb(0x8590a3))
+                            .when(!self.systems_active, |tab| {
+                                tab.bg(rgb(0x1b2028))
+                                    .border_color(rgb(0x7aa2f7))
+                                    .text_color(rgb(0xd4dce7))
+                            })
+                            .child(div().min_w_0().truncate().child(text_name))
+                            .when(text_dirty, |tab| {
+                                tab.child(
+                                    div()
+                                        .size(px(5.0))
+                                        .flex_shrink_0()
+                                        .rounded_full()
+                                        .bg(rgb(0x7aa2f7)),
+                                )
+                            })
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.show_editor(window, cx)),
+                            ),
+                    )
+                    .when_some(binary, |bar, (name, dirty, _)| {
+                        bar.child(
+                            div()
+                                .id("binary-document-tab")
+                                .h_full()
+                                .min_w_0()
+                                .max_w(px(240.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .cursor_pointer()
+                                .border_b_1()
+                                .border_color(rgb(0x2a313c))
+                                .text_color(rgb(0x8590a3))
+                                .when(self.systems_active, |tab| {
+                                    tab.bg(rgb(0x1b2028))
+                                        .border_color(rgb(0x7aa2f7))
+                                        .text_color(rgb(0xd4dce7))
+                                })
+                                .child(div().min_w_0().truncate().child(name))
+                                .when(dirty, |tab| {
+                                    tab.child(
+                                        div()
+                                            .size(px(5.0))
+                                            .flex_shrink_0()
+                                            .rounded_full()
+                                            .bg(rgb(0x7aa2f7)),
+                                    )
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.resume_systems(window, cx)
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(file_placeholder())
+                    .when(self.panels_visible && !self.systems_active, |row| {
+                        row.child(file_placeholder())
+                    })
                     .child(
                         div()
                             .flex()
@@ -415,84 +669,120 @@ impl Render for AppShell {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            .child(
-                                div()
-                                    .h(px(34.0))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .px_3()
-                                    .border_b_1()
-                                    .border_color(rgb(0x292d36))
-                                    .bg(rgb(0x171a20))
-                                    .text_sm()
-                                    .overflow_hidden()
-                                    .child(label),
-                            )
-                            .child(div().flex_1().min_h_0().child(self.editor.clone())),
+                            .when(!self.systems_active, |column| {
+                                column.when_some(self.path.as_ref(), |column, path| {
+                                    column.child(
+                                        div()
+                                            .h(px(24.0))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .px_3()
+                                            .bg(rgb(0x101216))
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(0x8590a3))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(path.display().to_string()),
+                                            ),
+                                    )
+                                })
+                            })
+                            .child(div().flex_1().min_h_0().child(if self.systems_active {
+                                self.workbench
+                                    .as_ref()
+                                    .expect("active systems view")
+                                    .clone()
+                                    .into_any_element()
+                            } else {
+                                self.editor.clone().into_any_element()
+                            })),
                     ),
             )
+            .when(self.panels_visible, |root| {
+                root.child(
+                    div()
+                        .h(panel_height)
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .border_t_1()
+                        .border_color(rgb(0x2a313c))
+                        .bg(rgb(0x15191f))
+                        .child(div().h(px(28.0)).flex_shrink_0().flex().children(tabs))
+                        .child(
+                            div()
+                                .id("panel-message")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .px_3()
+                                .py_2()
+                                .text_size(px(11.0))
+                                .whitespace_normal()
+                                .text_color(rgb(0x8590a3))
+                                .child(if self.panel == Panel::Output {
+                                    self.status.clone()
+                                } else {
+                                    self.panel.message().into()
+                                }),
+                        ),
+                )
+            })
             .child(
                 div()
-                    .h(px(132.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .border_t_1()
-                    .border_color(rgb(0x292d36))
-                    .bg(rgb(0x101217))
-                    .child(div().h(px(32.0)).flex().text_sm().children(tabs))
-                    .child(
-                        div()
-                            .id("panel-message")
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .p_3()
-                            .text_sm()
-                            .whitespace_normal()
-                            .text_color(rgb(0x8d94a3))
-                            .child(if self.panel == Panel::Output { self.status.clone() } else { self.panel.message().into() }),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(24.0))
+                    .h(px(22.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap_3()
                     .px_3()
                     .border_t_1()
-                    .border_color(rgb(0x292d36))
-                    .bg(rgb(0x171a20))
-                    .text_color(rgb(0x8d94a3))
-                    .text_sm()
+                    .border_color(rgb(0x2a313c))
+                    .bg(rgb(0x15191f))
+                    .text_color(rgb(0x8590a3))
+                    .text_size(px(11.0))
                     .overflow_hidden()
-                    .child(self.status.clone())
-                    .child(format!(
-                        "Ln {}, Col {}",
-                        position.line + 1,
-                        position.column + 1
-                    )),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(self.status.clone()),
+                    )
+                    .child(div().max_w(px(220.0)).min_w_0().truncate().child(location)),
             )
     }
 }
 
 fn file_placeholder() -> Div {
     div()
-        .w(px(236.0))
+        .w(px(170.0))
         .flex_shrink_0()
         .flex()
         .flex_col()
         .border_r_1()
-        .border_color(rgb(0x292d36))
-        .bg(rgb(0x13161b))
-        .child(div().px_3().py_2().text_sm().child("FILES"))
+        .border_color(rgb(0x2a313c))
+        .bg(rgb(0x15191f))
         .child(
             div()
-                .p_3()
-                .text_sm()
-                .text_color(rgb(0x747e90))
+                .h(px(28.0))
+                .flex()
+                .items_center()
+                .px_3()
+                .text_size(px(11.0))
+                .text_color(rgb(0xd4dce7))
+                .child("Files"),
+        )
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .text_size(px(11.0))
+                .text_color(rgb(0x8590a3))
                 .child("File navigation is not implemented yet."),
         )
 }

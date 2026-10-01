@@ -121,6 +121,11 @@ impl EditorBuffer {
         self.revision != self.saved_revision
     }
 
+    /// Content-history identity within this buffer, restored by undo/redo.
+    pub fn content_revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Existing and pasted bytes are retained; Enter uses the first line ending.
     pub fn insert_newline(&mut self) {
         self.insert(self.newline);

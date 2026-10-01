@@ -1,11 +1,74 @@
-# Historical checkpoint: 2026-09-26
+# Timed decompiler checkpoint — 2026-10-01
 
-This record describes the local single-file milestone before it was merged into
-`main` by PR #1. References below to a running desktop window, an unpushed
-checkout, or retained `target/` describe that session only. They are not current
-operating instructions. For current setup use the [README](../README.md).
+This is a historical handoff record. References to a running desktop window,
+an unpublished checkout, a time limit, or retained build artifacts describe the
+recorded session only. For current setup use the [README](../README.md).
 
-# Paused checkpoint — 2026-09-26
+The user authorized work until 09:33 Pacific local time (PDT on this date).
+Stop at that boundary; do not automatically resume the broader goal afterward.
+The latest continuation adds checked mapped snapshots, a bounded optional native
+worker runner and snapshot-bound Pseudocode/token navigation. See
+[decompiler validation](decompiler-validation.md) for commands and evidence limits.
+Native visual acceptance of the new pseudocode view remains open.
+
+The work is on `codex/analysis-wip-20260927`; draft PR #5 targets `main`.
+The broader capability contract is unfinished. On an explicit resume, inspect
+status and this checkpoint, validate the native pseudocode interaction, then
+continue the remaining program model and systems capabilities.
+
+## Prior continuation
+
+# Active systems continuation — 2026-10-01
+
+The user explicitly resumed systems work after both saved branches were pushed.
+Current branch: `codex/analysis-wip-20260927`. The prior runnable checkpoint stays
+on `codex/systems-workbench` at `5affb7c`. No merge has been performed.
+
+The resumed branch now integrates bounded function/control-flow analysis, native
+Flow graphs and references with shared locations and patch/history invalidation.
+All 85 workspace tests, format, check, Clippy, application linking and GPUI-free
+core boundary checks passed. Native X11 tests exercised graph selection, byte
+navigation, patches/undo/redo, reference links and resize; the isolated display
+terminated before approved-close exit could be verified in this run.
+
+See [analysis validation](analysis-validation.md) for exact evidence and remaining
+obligations. The full systems goal is still active. Next: checked mapped snapshots,
+bounded native decompiler process runner, pseudocode and address-token navigation.
+The native worker fixture passes but is not yet connected to the IDE.
+
+## Historical checkpoints
+
+# Working checkpoint — 2026-09-27
+
+The single-file milestone below was subsequently merged as PR #1. Current work
+continues from merge commit `4db630b` on `codex/systems-workbench`.
+
+The first systems slice adds linked source/assembly/byte locations, binary
+metadata, x86 decoding, patch preview/history, safe copy export, independent
+text/binary close guards, and small view controls. The UI now has compact native
+chrome, file tabs, aligned assembly/hex lists and an inline command area; secondary
+controls are tucked into Details. The latest local suite passes 76 tests, and
+native acceptance covers exact export/reopen, compact/zoomed layouts, cancellation,
+and normal process exit after clean close and approved dirty text/binary closes. It preserves the existing
+native editor. See [behavior](systems-workbench.md) and
+[validation](systems-validation.md). The [capability contract](systems-capabilities.md)
+retains the full Ghidra-level goal; this slice does not complete it.
+
+Next integration work should use the verified installed-backend inventory.
+Rizin static analysis is available, but `pdgj` is absent; Cutter currently has
+unresolved Rizin 0.7 libraries. An opt-in pinned C++ Ghidra experiment verifies
+Java-free pseudocode/address-token mapping. No backend or system package was
+installed or changed. The experiment is not connected to the IDE yet.
+
+At this checkpoint the feature changes were still local. The later draft PR
+published them. Retain the evidence boundary between automated tests, native
+acceptance and remote CI.
+
+```sh
+cargo run --locked -p a-less-awful-editor
+```
+
+## Historical pause — 2026-09-26
 
 The single-file persistence milestone is implemented on `feat/interactive-scratch`.
 The requested local checks pass: format, 35 workspace tests, workspace check,
