@@ -11,6 +11,9 @@ use std::{path::PathBuf, sync::Arc};
 #[path = "systems_analysis.rs"]
 mod analysis;
 use analysis::AnalysisState;
+#[path = "systems_decompiler.rs"]
+mod native_decompiler;
+use native_decompiler::DecompilerState;
 
 #[cfg(test)]
 #[path = "systems_tests.rs"]
@@ -21,6 +24,7 @@ pub(crate) enum Lens {
     Overview,
     Assembly,
     Flow,
+    Pseudocode,
     Bytes,
     Strings,
 }
@@ -30,6 +34,7 @@ impl Lens {
             Self::Overview => "Overview",
             Self::Assembly => "Assembly",
             Self::Flow => "Flow",
+            Self::Pseudocode => "Pseudocode",
             Self::Bytes => "Bytes",
             Self::Strings => "Strings",
         }
@@ -97,6 +102,7 @@ pub(crate) struct Workbench {
     font_size: f32,
     scroll: gpui::ScrollHandle,
     analysis: AnalysisState,
+    decompiler: DecompilerState,
 }
 impl EventEmitter<WorkbenchEvent> for Workbench {}
 impl Focusable for Workbench {
@@ -181,6 +187,7 @@ impl Workbench {
             font_size: 12.5,
             scroll: gpui::ScrollHandle::new(),
             analysis: AnalysisState::default(),
+            decompiler: DecompilerState::default(),
         };
         this.decode();
         this.refresh_entropy(cx);
@@ -245,6 +252,7 @@ impl Workbench {
             }
         }
         self.offset = offset;
+        self.decompiler_location_changed();
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         self.preview = None;
         self.decode();
@@ -889,6 +897,7 @@ impl Render for Workbench {
             Lens::Overview => self.overview(cx),
             Lens::Assembly => self.assembly(cx),
             Lens::Flow => self.flow_view(cx),
+            Lens::Pseudocode => self.pseudocode_view(cx),
             Lens::Bytes => self.bytes(cx),
             Lens::Strings => div()
                 .flex()
@@ -958,7 +967,7 @@ impl Render for Workbench {
             .bg(rgb(0x101216)).text_size(px(12.0)).text_color(rgb(0xd4dce7))
             .child(div().flex().items_center().h(px(30.0)).flex_shrink_0().px_2()
                 .bg(rgb(0x15191f)).border_b_1().border_color(rgb(0x2a313c))
-                .children([Lens::Overview, Lens::Assembly, Lens::Flow, Lens::Bytes, Lens::Strings].map(|lens| {
+                .children([Lens::Overview, Lens::Assembly, Lens::Flow, Lens::Pseudocode, Lens::Bytes, Lens::Strings].map(|lens| {
                     button(lens.name()).h(px(30.0)).px_3().border_b_2()
                         .border_color(rgb(if lens == self.lens { 0x7aa2f7 } else { 0x15191f }))
                         .when(lens == self.lens, |tab| tab.text_color(rgb(0xd4dce7)))
@@ -967,7 +976,7 @@ impl Render for Workbench {
                 .child(button("Source").on_click(cx.listener(|this, _, _, cx| this.source(cx))))
                 .child(div().flex_1())
                 .child(button("Back").on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(offset) = this.back.pop() { this.offset = offset; this.preview = None;
+                    if let Some(offset) = this.back.pop() { this.offset = offset; this.decompiler_location_changed(); this.preview = None;
                         this.scroll.set_offset(gpui::point(px(0.0), px(0.0))); this.decode(); cx.notify(); }
                 })))
                 .child(button("Next").on_click(cx.listener(|this, _, _, cx| {
@@ -1002,7 +1011,7 @@ impl Render for Workbench {
                 .children(self.image.warnings.iter().map(|warning| div().whitespace_normal().text_color(rgb(0xe0af68)).child(warning.clone())))
                 .child(div().whitespace_normal().child(self.message.clone()))))
             .child(div().flex().flex_1().min_h_0()
-                .when(self.inspector || self.lens == Lens::Flow, |row| row.child(self.analysis_sidebar(cx)))
+                .when(self.inspector || matches!(self.lens, Lens::Flow | Lens::Pseudocode), |row| row.child(self.analysis_sidebar(cx)))
                 .child(div().id("binary-body").flex_1().min_w_0().overflow_scroll().track_scroll(&self.scroll).child(body)))
             .child(div().flex().items_center().h(px(28.0)).flex_shrink_0().px_2()
                 .border_t_1().border_color(rgb(0x2a313c)).bg(rgb(0x15191f))

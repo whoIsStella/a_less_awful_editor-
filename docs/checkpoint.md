@@ -1,3 +1,19 @@
+# Timed decompiler checkpoint — 2026-10-01
+
+The user authorized work until 09:33 Pacific local time (PDT on this date).
+Stop at that boundary; do not automatically resume the broader goal afterward.
+The latest continuation adds checked mapped snapshots, a bounded optional native
+worker runner and snapshot-bound Pseudocode/token navigation. See
+[decompiler validation](decompiler-validation.md) for commands and evidence limits.
+Native visual acceptance of the new pseudocode view remains open.
+
+The work is on `codex/analysis-wip-20260927`; draft PR #5 targets `main`.
+The broader capability contract is unfinished. On an explicit resume, inspect
+status and this checkpoint, validate the native pseudocode interaction, then
+continue the remaining program model and systems capabilities.
+
+## Prior continuation
+
 # Active systems continuation — 2026-10-01
 
 The user explicitly resumed systems work after both saved branches were pushed.

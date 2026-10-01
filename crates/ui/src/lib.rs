@@ -1,3 +1,4 @@
+mod decompiler;
 mod persistence;
 pub mod prompts;
 mod systems;

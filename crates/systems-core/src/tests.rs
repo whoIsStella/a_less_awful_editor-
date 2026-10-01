@@ -418,3 +418,51 @@ fn macho64_sections_map_and_disassemble_without_loading_binary() {
             .contains("fat Mach-O")
     );
 }
+
+#[test]
+fn decompiler_snapshot_is_exact_bounded_and_abi_gated() {
+    let bytes = elf(62);
+    let image = BinaryImage::parse(bytes.clone()).unwrap();
+    let regions = image.decompiler_regions().unwrap();
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].address, 0x401000);
+    assert_eq!(regions[0].file_offset, 0x100);
+    assert_eq!(regions[0].bytes, &bytes[0x100..0x10c]);
+    assert!(regions[0].readonly);
+    assert!(image.mapped_regions(11, 256).is_err());
+    assert!(image.mapped_regions(1024, 0).is_err());
+    for (offset, value) in [(7, 9), (8, 1), (16, 1)] {
+        let mut unsupported = bytes.clone();
+        unsupported[offset] = value;
+        assert!(
+            BinaryImage::parse(unsupported)
+                .unwrap()
+                .decompiler_regions()
+                .is_err()
+        );
+    }
+    let mut writable = bytes.clone();
+    put64(&mut writable, 0x248, 7);
+    assert!(
+        !BinaryImage::parse(writable)
+            .unwrap()
+            .decompiler_regions()
+            .unwrap()[0]
+            .readonly
+    );
+    let mut overlap = image.clone();
+    overlap.mappings.push(overlap.mappings[0].clone());
+    assert!(
+        overlap
+            .decompiler_regions()
+            .unwrap_err()
+            .contains("Aliased")
+    );
+    overlap.mappings[1].offset = 0x180;
+    assert!(
+        overlap
+            .decompiler_regions()
+            .unwrap_err()
+            .contains("Overlapping")
+    );
+}

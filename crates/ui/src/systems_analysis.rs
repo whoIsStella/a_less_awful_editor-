@@ -27,6 +27,7 @@ impl Drop for AnalysisState {
 
 impl Workbench {
     pub(super) fn refresh_analysis(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_decompiler();
         self.cancel_analysis(cx);
         self.analysis.result = None;
         self.analysis.running = true;
@@ -170,7 +171,7 @@ impl Workbench {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.analysis.focused_function = Some(offset);
                                         this.go(offset, cx);
-                                        if this.lens != Lens::Flow {
+                                        if !matches!(this.lens, Lens::Flow | Lens::Pseudocode) {
                                             this.lens = Lens::Assembly;
                                         }
                                     }))

@@ -12,10 +12,12 @@ use object::{Object, ObjectSection, ObjectSymbol};
 
 mod analysis;
 mod dwarf;
+mod memory;
 pub use analysis::{
     Analysis, AnalysisLimits, AnalyzedFunction, BasicBlock, CrossReference, EdgeKind,
     EdgeResolution, FlowEdge, FunctionProvenance, ReferenceKind,
 };
+pub use memory::MappedRegion;
 
 const MAX_IMAGE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_SECTIONS: usize = 16_384;
@@ -121,6 +123,7 @@ pub struct SourceLocation {
 
 #[derive(Clone, Debug)]
 struct Mapping {
+    readonly: bool,
     address: u64,
     offset: usize,
     size: usize,
@@ -202,6 +205,7 @@ impl BinaryImage {
             let mapped_size = u64::try_from(file_size).unwrap_or(u64::MAX).min(size);
             if mapped && mapped_size != 0 {
                 mappings.push(Mapping {
+                    readonly: matches!(section.flags(), object::SectionFlags::Elf { sh_flags } if sh_flags & u64::from(object::elf::SHF_WRITE) == 0),
                     address,
                     offset: file_offset,
                     size: usize::try_from(mapped_size)

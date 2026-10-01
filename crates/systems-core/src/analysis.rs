@@ -763,6 +763,7 @@ mod tests {
             executable: true,
         }];
         image.mappings = vec![Mapping {
+            readonly: true,
             address: 0x1000,
             offset: 0,
             size: bytes.len(),
@@ -845,6 +846,7 @@ mod tests {
     fn ambiguous_mapping_and_nonexecutable_targets_are_not_decoded() {
         let mut fixture = image(&[0xeb, 0, 0xc3]);
         fixture.mappings.push(Mapping {
+            readonly: true,
             address: 0x1002,
             offset: 2,
             size: 1,

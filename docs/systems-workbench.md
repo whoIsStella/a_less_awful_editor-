@@ -62,7 +62,7 @@ and neither source timestamps nor content are guaranteed to match the build.
 Optimized code can map one line to several addresses. Stripped binaries do not
 provide original source. PDB, split/compressed DWARF, relocatable-object DWARF,
 inline-call reconstruction, and ambiguous line intervals are not supported yet.
-There is no recovered pseudocode view in this slice.
+An optional native Pseudocode view is available for the restricted ELF/x86-64 contract described below.
 
 ## Formats, bounds and patches
 
@@ -137,5 +137,18 @@ opens the full linear view. The reference list displays at most 256 matches.
 This is candidate recovery, not proof of code/data separation or full program
 semantics. Indirect target recovery, exception flow, data references and user
 function definitions remain open. Graph routes can overlap and function membership
-can be ambiguous for shared tails. The native decompiler experiment is still
-separate; no pseudocode is presented by the IDE yet.
+can be ambiguous for shared tails. The optional native decompiler now connects to the Pseudocode tab; its broader
+processor and program-model coverage remains unfinished.
+
+## Optional pseudocode
+
+Set `ALE_DECOMPILER` to an absolute path to the pinned native worker before launch.
+Choose a function, open Pseudocode and press Decompile. Click a mapped token to
+select its machine location, then switch to Assembly or Bytes; Copy code copies
+the full recovered result. Cancel retains the document. New bytes or a different
+function clear the old pseudocode. Missing configuration and unsupported inputs
+show recoverable explanations. Names and types are inferred, not original source.
+
+See [worker setup](../tools/native-decompiler/README.md) and
+[validation and limits](decompiler-validation.md). Linux ELF64/x86-64 is the initial
+contract; this does not establish broad decompiler parity or native visual acceptance.
