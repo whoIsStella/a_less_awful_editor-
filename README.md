@@ -2,16 +2,21 @@
 
 I wanted less bullshit between opening a file and understanding what is in it. A Less Awful Editor is a native Rust/GPUI editor project growing into a systems workbench: source, assembly, bytes, and patch/export tools in the same workspace.
 
-**Unfinished; this GitHub checkout is behind the local workbench milestone.**
-You can build the single-file UTF-8 editor here. The later local checkpoint
-reports linked source/assembly/byte views, x86 decoding, patch previews, and
-safe copy export, with 76 tests and native acceptance. That source is not yet
-on the inspected remote branches; those results have not been rerun here.
-The decompiler integration remains separate, unverified work in progress.
+**Working systems-workbench slice, unfinished IDE.** The current project
+checkpoint includes file tabs, linked source/assembly/byte locations, binary
+metadata, x86 decoding, aligned assembly/hex views, patch preview/history,
+and safe copy export. Its validation record covers 76 passing tests and native
+acceptance, including exact export/reopen and separate text/binary dirty-close
+guards. Decompiler integration remains isolated, uncompiled and untested.
 
-NEW EDITOR, Minimal IDE, and A Less Awful Editor refer to this same project.
-[Checkpoint details and the historical screenshot](docs/project-state.md)
-explain what is available in this checkout and what still needs publishing.
+**Checkout note:** GitHub currently contains the earlier single-file UTF-8
+foundation. The workbench checkpoint is local at `4e9ffe3` on
+`codex/systems-workbench`; it still needs publishing. The commands below run
+what is checked in here.
+
+NEW EDITOR, Minimal IDE, and A Less Awful Editor are this same project.
+NEW EDITOR is the authoritative project-state record.
+[Checkpoint details and historical screenshot](docs/project-state.md).
 
 ## What you can build from this checkout
 
