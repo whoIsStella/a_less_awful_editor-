@@ -115,7 +115,13 @@ executable file-backed regions. Function candidates come from entry points,
 executable symbols and direct calls. The navigator switches between functions and
 symbols; graph instructions, edge destinations, and the References list navigate
 the same location used by Assembly, Bytes and Source. References include direct
-branches/calls and explicitly unresolved indirect transfers.
+branches/calls and explicitly unresolved indirect transfers. On x86-64, they also
+include static RIP/EIP-relative address-taking and potential data reads, writes,
+and read/write accesses. Open Flow → References at a function or data location.
+A data target opens Bytes; its source opens Assembly. Pointer-slot references do
+not resolve indirect call targets. These references identify the operand's starting
+address, not the full access range or a runtime value. Register-based pointers,
+FS/GS memory accesses, relocations and immediate-address inference are not recovered.
 
 Analysis runs in the background. Applying, undoing, or redoing a patch refreshes
 the analysis to match the displayed bytes. Raw bytes, ambiguous mappings and other
@@ -126,7 +132,7 @@ The graph displays at most 64 blocks with six instruction lines per card; Listin
 opens the full linear view. The reference list displays at most 256 matches.
 
 This is candidate recovery, not proof of code/data separation or full program
-semantics. Indirect target recovery, exception flow, data references and user
+semantics. Indirect target recovery, exception flow, general pointer analysis and user
 function definitions are unavailable. Graph routes can overlap and function membership
 can be ambiguous for shared tails. The optional native decompiler now connects to the Pseudocode tab; it supports the inputs listed below.
 

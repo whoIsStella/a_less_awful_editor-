@@ -503,6 +503,11 @@ impl Workbench {
         for (index, reference) in matches.into_iter().enumerate() {
             let from = reference.from_offset;
             let target = reference.target_offset;
+            let target_lens = if reference.kind.is_data() {
+                Lens::Bytes
+            } else {
+                Lens::Assembly
+            };
             root = root.child(
                 div()
                     .id(("reference", index))
@@ -515,6 +520,7 @@ impl Workbench {
                     .border_color(rgb(0x1b2028))
                     .child(
                         button(format!("{:08x}", reference.from_address))
+                            .debug_selector(|| format!("reference-source-{index}"))
                             .font_family("DejaVu Sans Mono")
                             .text_color(rgb(0x7aa2f7))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -536,12 +542,13 @@ impl Workbench {
                                 .map(|address| format!("{address:08x}"))
                                 .unwrap_or_else(|| "unresolved".into()),
                         )
+                        .debug_selector(|| format!("reference-target-{index}"))
                         .font_family("DejaVu Sans Mono")
                         .when_some(target, |button, target| {
                             button.text_color(rgb(0x7aa2f7)).on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.go(target, cx);
-                                    this.lens = Lens::Assembly;
+                                    this.lens = target_lens;
                                 },
                             ))
                         }),
@@ -698,5 +705,57 @@ fn graph_layout(function: &AnalyzedFunction) -> GraphLayout {
         routes,
         width,
         height: y,
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+    use ale_systems_core::{CrossReference, ReferenceKind};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn data_target_opens_bytes_and_source_returns_to_assembly(cx: &mut TestAppContext) {
+        let (image, mut analysis) = crate::decompiler::tests::fixture();
+        analysis.references = vec![CrossReference {
+            from_address: 0x401000,
+            from_offset: 0x100,
+            target_address: Some(0x401003),
+            target_offset: Some(0x103),
+            kind: ReferenceKind::DataAddress,
+            resolution: EdgeResolution::Resolved,
+        }];
+        let (view, cx) =
+            cx.add_window_view(|_, cx| Workbench::new(PathBuf::from("fixture.elf"), image, cx));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.analysis.result = Some(Arc::new(analysis));
+                view.analysis.references = true;
+                view.go(0x100, cx);
+                view.lens = Lens::Flow;
+            })
+        });
+        for (selector, offset, lens) in [
+            ("reference-target-0", 0x103, Lens::Bytes),
+            ("reference-source-0", 0x100, Lens::Assembly),
+        ] {
+            cx.update(|_, cx| view.update(cx, |view, _| view.lens = Lens::Flow));
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                gpui::size(px(1000.0), px(800.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("reference navigation target painted");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.update(|_, cx| {
+                view.update(cx, |view, _| {
+                    assert_eq!(view.offset, offset);
+                    assert_eq!(view.lens, lens);
+                })
+            });
+        }
     }
 }

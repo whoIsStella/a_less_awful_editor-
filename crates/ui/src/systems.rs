@@ -19,7 +19,7 @@ use native_decompiler::DecompilerState;
 #[path = "systems_tests.rs"]
 mod tests;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lens {
     Overview,
     Assembly,
