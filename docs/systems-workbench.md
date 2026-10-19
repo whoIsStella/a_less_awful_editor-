@@ -141,3 +141,7 @@ show recoverable explanations. Names and types are inferred, not original source
 
 See [worker setup and input limits](../tools/native-decompiler/README.md).
 Pseudocode is supported for Linux ELF64 little-endian x86-64 executables and shared objects.
+
+Long pseudocode lines wrap into bounded display rows, with continuation markers.
+Each page shows up to 32 rows. Copy code retains the complete, original output,
+including its line breaks; mapped tokens retain their machine locations across rows.
