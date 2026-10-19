@@ -41,4 +41,6 @@ names/types; it is not the original source. Worker diagnostics remain visible.
 - Cancel, closing the binary, patching, or selecting another function clears the previous result. You can run Decompile again for the new selection.
 - The worker runs with resource limits, but remains a trusted executable. Only configure a worker you trust.
 - Pseudocode is limited to 1 MiB / 100,000 tokens; native output to 16 MiB and
-  stderr to 64 KiB. Display pages contain 120 lines. Very long lines and dense token layouts may slow down the view.
+  stderr to 64 KiB. Display pages contain up to 32 rows of at most 256 UTF-8
+  bytes each. Continuation markers identify wrapped lines; Copy code retains
+  the original text and line breaks.
