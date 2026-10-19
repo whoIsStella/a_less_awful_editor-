@@ -73,6 +73,16 @@ impl Drop for DecompilerState {
     }
 }
 impl Workbench {
+    fn set_pseudocode_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let last = self.decompiler.lines.len().saturating_sub(1) / PAGE_LINES;
+        let page = page.min(last);
+        if page != self.decompiler.page {
+            self.decompiler.page = page;
+            self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        }
+    }
+
     pub(super) fn invalidate_decompiler(&mut self) {
         if let Some(cancel) = self.decompiler.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
@@ -259,6 +269,7 @@ impl Workbench {
                 }
                 let mut span = div()
                     .id(("pseudocode-token", index))
+                    .debug_selector(|| format!("pseudocode-token-{line_index}-{index}"))
                     .flex_shrink_0()
                     .text_color(rgb(match token.kind.as_str() {
                         "type" => 0x7dcfff,
@@ -297,15 +308,11 @@ impl Workbench {
                 .gap_2()
                 .child(
                     button("Previous rows").on_click(cx.listener(|this, _, _, cx| {
-                        this.decompiler.page = this.decompiler.page.saturating_sub(1);
-                        cx.notify();
+                        this.set_pseudocode_page(this.decompiler.page.saturating_sub(1), cx);
                     })),
                 )
                 .child(button("Next rows").on_click(cx.listener(|this, _, _, cx| {
-                    if (this.decompiler.page + 1) * PAGE_LINES < this.decompiler.lines.len() {
-                        this.decompiler.page += 1;
-                    }
-                    cx.notify();
+                    this.set_pseudocode_page(this.decompiler.page.saturating_add(1), cx);
                 })))
                 .child(format!(
                     "Page {} · {} display rows",
@@ -362,6 +369,87 @@ mod tests {
         assert_eq!(rows[0].range, 0..ROW_BYTES);
         assert_eq!(rows[1].source_line, 2);
         assert_eq!(&text[rows[1].range.clone()], "next");
+    }
+
+    #[gpui::test]
+    fn wrapped_token_click_keeps_mapping_across_pages(cx: &mut TestAppContext) {
+        let (image, _) = crate::decompiler::tests::fixture();
+        let (view, cx) =
+            cx.add_window_view(|_, cx| Workbench::new(PathBuf::from("fixture.elf"), image, cx));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.go(0x100, cx);
+                view.lens = Lens::Pseudocode;
+                let text = "é🦀".repeat(2000);
+                view.decompiler.lines = display_rows(&text);
+                view.decompiler.entry = Some(0x401000);
+                view.decompiler.result = Some(Decompiled {
+                    entry: 0x401000,
+                    tokens: vec![decompiler::Token {
+                        range: 0..text.len(),
+                        offset: Some(0x103),
+                        kind: "variable".into(),
+                    }],
+                    text,
+                    diagnostics: Vec::new(),
+                });
+            });
+        });
+        for (page, selector) in [(0, "pseudocode-token-0-0"), (1, "pseudocode-token-32-0")] {
+            cx.update(|_, cx| {
+                view.update(cx, |view, _| {
+                    view.decompiler.page = page;
+                    view.offset = 0x100;
+                })
+            });
+            cx.draw(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(1000.0), px(800.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("wrapped token was painted");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.update(|_, cx| {
+                view.update(cx, |view, _| {
+                    assert_eq!(view.offset, 0x103);
+                    assert!(view.decompiler.result.is_some());
+                    assert_eq!(view.decompiler.page, page);
+                })
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn page_change_reveals_start_and_preserves_machine_location(cx: &mut TestAppContext) {
+        let (image, _) = crate::decompiler::tests::fixture();
+        let (view, cx) =
+            cx.add_window_view(|_, cx| Workbench::new(PathBuf::from("fixture.elf"), image, cx));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.decompiler.lines = display_rows(&"line\n".repeat(PAGE_LINES + 1));
+                view.offset = 0x103;
+                let scrolled = gpui::point(px(-80.0), px(-120.0));
+                view.scroll.set_offset(scrolled);
+                view.set_pseudocode_page(1, cx);
+                assert_eq!(view.scroll.offset(), gpui::point(px(0.0), px(0.0)));
+                assert_eq!(view.offset, 0x103);
+                view.scroll.set_offset(scrolled);
+                view.set_pseudocode_page(usize::MAX, cx);
+                assert_eq!(view.decompiler.page, 1);
+                assert_eq!(
+                    view.scroll.offset(),
+                    scrolled,
+                    "last-page no-op retains scroll"
+                );
+                view.set_pseudocode_page(0, cx);
+                assert_eq!(view.scroll.offset(), gpui::point(px(0.0), px(0.0)));
+                assert_eq!(view.offset, 0x103);
+            })
+        });
     }
 
     #[gpui::test]
