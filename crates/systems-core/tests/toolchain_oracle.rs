@@ -373,3 +373,76 @@ fn compiled_elf_matches_readelf_objdump_and_addr2line() {
         "fixture should exercise multiple source-line intervals"
     );
 }
+
+#[test]
+fn rip_relative_data_references_match_linked_objdump_targets() {
+    use ale_systems_core::{AnalysisLimits, EdgeResolution, ReferenceKind};
+    use std::sync::atomic::AtomicBool;
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        eprintln!("SKIP: linked ELF/x86-64 data-reference oracle requires Linux x86-64");
+        return;
+    }
+    if !optional_tool_available("cc") || !optional_tool_available("objdump") {
+        return;
+    }
+    let directory = FixtureDirectory::new();
+    let source = directory.0.join("references.S");
+    let executable = directory.0.join("references.elf");
+    fs::write(&source, ".text\n.globl probe\n.type probe,@function\nprobe:\n lea data(%rip),%rax\n mov data(%rip),%eax\n mov %eax,data(%rip)\n incl data(%rip)\n call *slot(%rip)\n ret\n.size probe,.-probe\n.data\n.balign 8\ndata: .long 7\n.balign 8\nslot: .quad probe\n.section .note.GNU-stack,\"\",@progbits\n").unwrap();
+    successful_output(
+        Command::new("cc")
+            .args(["-nostdlib", "-no-pie", "-Wl,-e,probe"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable),
+    );
+    let image = BinaryImage::parse(fs::read(&executable).unwrap()).unwrap();
+    let analysis = image
+        .analyze(
+            &Architecture::X86_64,
+            AnalysisLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let listing = output_text(
+        Command::new("objdump")
+            .args(["-d", "-Mintel", "--disassemble=probe"])
+            .arg(&executable),
+    );
+    let instructions = objdump_instructions(&listing);
+    let expected = [
+        ReferenceKind::DataAddress,
+        ReferenceKind::DataRead,
+        ReferenceKind::DataWrite,
+        ReferenceKind::DataReadWrite,
+        ReferenceKind::DataRead,
+    ];
+    let references: Vec<_> = analysis
+        .references
+        .iter()
+        .filter(|r| r.kind.is_data())
+        .collect();
+    assert_eq!(references.len(), expected.len());
+    for ((reference, instruction), kind) in references.iter().zip(&instructions).zip(expected) {
+        let target = hex(instruction
+            .text
+            .split_once('#')
+            .expect("objdump static target comment")
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap());
+        assert_eq!(reference.from_address, instruction.address);
+        assert_eq!(reference.target_address, Some(target));
+        assert_eq!(reference.target_offset, image.address_to_offset(target));
+        assert_eq!(reference.kind, kind);
+        assert_eq!(reference.resolution, EdgeResolution::Resolved);
+    }
+    let indirect = analysis
+        .references
+        .iter()
+        .find(|r| r.kind == ReferenceKind::IndirectCall)
+        .unwrap();
+    assert_eq!(indirect.resolution, EdgeResolution::Indirect);
+    assert_eq!(indirect.target_address, None);
+}

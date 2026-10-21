@@ -7,7 +7,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter, OpKind};
+use iced_x86::{
+    Decoder, DecoderOptions, FlowControl, Formatter, InstructionInfoFactory, IntelFormatter,
+    Mnemonic, OpAccess, OpKind, Register,
+};
 
 use crate::{Architecture, BinaryFormat, BinaryImage, Instruction};
 
@@ -101,11 +104,25 @@ pub struct FlowEdge {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReferenceKind {
+    /// Potential static access; does not establish execution or a runtime value.
+    DataRead,
+    DataWrite,
+    DataReadWrite,
+    DataAddress,
     Call,
     ConditionalBranch,
     Jump,
     IndirectCall,
     IndirectJump,
+}
+
+impl ReferenceKind {
+    pub fn is_data(self) -> bool {
+        matches!(
+            self,
+            Self::DataRead | Self::DataWrite | Self::DataReadWrite | Self::DataAddress
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -121,6 +138,7 @@ pub struct CrossReference {
 #[derive(Clone)]
 struct Node {
     instruction: Instruction,
+    data_reference: Option<CrossReference>,
     edges: Vec<FlowEdge>,
     ends_block: bool,
 }
@@ -234,14 +252,19 @@ impl AddressSpace {
         }
     }
 
-    fn locate(&self, address: u64) -> Result<(usize, usize), EdgeResolution> {
+    fn locate_mapped(&self, address: u64) -> Result<(usize, usize), EdgeResolution> {
         let index = self.addresses.find(address)?;
         let region = &self.regions[index];
         let offset = region.offset + (address - region.address) as usize;
         if self.offsets.find(offset as u64)? != index {
             return Err(EdgeResolution::Overlap);
         }
-        if !region.executable {
+        Ok((offset, index))
+    }
+
+    fn locate(&self, address: u64) -> Result<(usize, usize), EdgeResolution> {
+        let (offset, index) = self.locate_mapped(address)?;
+        if !self.regions[index].executable {
             return Err(EdgeResolution::NonExecutable);
         }
         Ok((offset, index))
@@ -297,6 +320,7 @@ impl BinaryImage {
             seeds: BTreeMap::new(),
             pending_functions: VecDeque::new(),
             cache: BTreeMap::new(),
+            info_factory: InstructionInfoFactory::new(),
             rejected: BTreeMap::new(),
             included_instructions: 0,
             included_bytes: 0,
@@ -375,6 +399,7 @@ struct Analyzer<'a> {
     seeds: BTreeMap<usize, Seed>,
     pending_functions: VecDeque<usize>,
     cache: BTreeMap<usize, Node>,
+    info_factory: InstructionInfoFactory,
     rejected: BTreeMap<usize, EdgeResolution>,
     included_instructions: usize,
     included_bytes: usize,
@@ -448,6 +473,47 @@ impl Analyzer<'_> {
             kind,
             resolution,
         }
+    }
+
+    fn data_reference(
+        &mut self,
+        decoded: &iced_x86::Instruction,
+        instruction: &Instruction,
+    ) -> Option<CrossReference> {
+        // RIP/EIP-relative addresses are static in 64-bit mode. FS/GS memory
+        // accesses need a runtime segment base; register-indirect and immediate
+        // operands are deliberately not treated as pointer evidence.
+        if !instruction.valid || self.bitness != 64 || !decoded.is_ip_rel_memory_operand() {
+            return None;
+        }
+        let kind = if decoded.mnemonic() == Mnemonic::Lea {
+            ReferenceKind::DataAddress
+        } else {
+            if matches!(decoded.memory_segment(), Register::FS | Register::GS) {
+                return None;
+            }
+            let operand =
+                (0..decoded.op_count()).find(|&i| decoded.op_kind(i) == OpKind::Memory)?;
+            match self.info_factory.info(decoded).op_access(operand) {
+                OpAccess::Read | OpAccess::CondRead => ReferenceKind::DataRead,
+                OpAccess::Write | OpAccess::CondWrite => ReferenceKind::DataWrite,
+                OpAccess::ReadWrite | OpAccess::ReadCondWrite => ReferenceKind::DataReadWrite,
+                _ => return None,
+            }
+        };
+        let target_address = decoded.ip_rel_memory_address();
+        let (target_offset, resolution) = match self.space.locate_mapped(target_address) {
+            Ok((offset, _)) => (Some(offset), EdgeResolution::Resolved),
+            Err(reason) => (None, reason),
+        };
+        Some(CrossReference {
+            from_address: instruction.address,
+            from_offset: instruction.offset,
+            target_address: Some(target_address),
+            target_offset,
+            kind,
+            resolution,
+        })
     }
 
     fn decode(&mut self, address: u64) -> Result<Node, EdgeResolution> {
@@ -551,7 +617,9 @@ impl Analyzer<'_> {
                 }
             }
         }
+        let data_reference = self.data_reference(&decoded, &instruction);
         let node = Node {
+            data_reference,
             instruction,
             edges,
             ends_block: !valid || flow != FlowControl::Next,
@@ -715,6 +783,16 @@ impl Analyzer<'_> {
             }
         }
         let mut references = BTreeSet::new();
+        for offset in &included {
+            check_cancelled(self.cancelled)?;
+            if let Some(reference) = self
+                .cache
+                .get(offset)
+                .and_then(|node| node.data_reference.as_ref())
+            {
+                references.insert(reference.clone());
+            }
+        }
         for function in &self.result.functions {
             check_cancelled(self.cancelled)?;
             for block in &function.blocks {
@@ -779,6 +857,142 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .unwrap()
+    }
+
+    fn data_image(opcode: &[u8], target: u64) -> BinaryImage {
+        let mut code = opcode.to_vec();
+        let next = 0x1000 + code.len() as u64 + 4;
+        code.extend_from_slice(&((target as i64 - next as i64) as i32).to_le_bytes());
+        code.push(0xc3);
+        let code_len = code.len();
+        code.resize(32, 0);
+        code.extend_from_slice(b"message\0");
+        let mut image = image(&code);
+        image.sections[0].size = code_len as u64;
+        image.sections[0].file_size = code_len;
+        image.mappings[0].size = code_len;
+        image.mappings.push(Mapping {
+            readonly: false,
+            address: 0x2000,
+            offset: 32,
+            size: 8,
+        });
+        image
+    }
+
+    #[test]
+    fn rip_relative_data_accesses_are_classified_without_decoding_data() {
+        for (opcode, kind) in [
+            (&[0x48, 0x8d, 0x05][..], ReferenceKind::DataAddress),
+            (&[0x8b, 0x05][..], ReferenceKind::DataRead),
+            (&[0x89, 0x05][..], ReferenceKind::DataWrite),
+            (&[0xff, 0x05][..], ReferenceKind::DataReadWrite),
+        ] {
+            let result = analyze(&data_image(opcode, 0x2000));
+            assert_eq!(result.instruction_count, 2);
+            assert_eq!(result.functions.len(), 1);
+            assert_eq!(result.references.len(), 1);
+            assert_eq!(
+                result.references[0],
+                CrossReference {
+                    from_address: 0x1000,
+                    from_offset: 0,
+                    target_address: Some(0x2000),
+                    target_offset: Some(32),
+                    kind,
+                    resolution: EdgeResolution::Resolved,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn relative_data_addresses_handle_negative_displacements_and_eip_wrap() {
+        let mut negative = data_image(&[0x8b, 0x05], 0x800);
+        negative.mappings[1].address = 0x800;
+        assert_eq!(analyze(&negative).references[0].target_offset, Some(32));
+
+        let mut wrapped = data_image(&[0x67, 0x8b, 0x05], 0x2000);
+        wrapped.entry = Some(0x1_0000_1000);
+        wrapped.sections[0].address = 0x1_0000_1000;
+        wrapped.mappings[0].address = 0x1_0000_1000;
+        let result = analyze(&wrapped);
+        assert_eq!(result.references[0].target_address, Some(0x2000));
+        assert_eq!(result.references[0].target_offset, Some(32));
+    }
+
+    #[test]
+    fn pointer_slot_reference_does_not_resolve_indirect_control_flow() {
+        let result = analyze(&data_image(&[0xff, 0x15], 0x2000));
+        assert_eq!(result.references.len(), 2);
+        let data = result.references.iter().find(|r| r.kind.is_data()).unwrap();
+        assert_eq!(data.kind, ReferenceKind::DataRead);
+        assert_eq!(data.target_offset, Some(32));
+        let call = result
+            .references
+            .iter()
+            .find(|r| r.kind == ReferenceKind::IndirectCall)
+            .unwrap();
+        assert_eq!(call.resolution, EdgeResolution::Indirect);
+        assert_eq!(call.target_address, None);
+        assert_eq!(result.functions.len(), 1);
+    }
+
+    #[test]
+    fn data_references_reject_ambiguous_mappings_and_keep_unmapped_addresses() {
+        let result = analyze(&data_image(&[0x8b, 0x05], 0x3000));
+        assert_eq!(result.references[0].target_address, Some(0x3000));
+        assert_eq!(result.references[0].target_offset, None);
+        assert_eq!(result.references[0].resolution, EdgeResolution::Unmapped);
+        for alias_address in [0x2000, 0x3000] {
+            let mut image = data_image(&[0x8b, 0x05], 0x2000);
+            image.mappings.push(Mapping {
+                readonly: true,
+                address: alias_address,
+                offset: 32,
+                size: 8,
+            });
+            let result = analyze(&image);
+            assert_eq!(result.references[0].resolution, EdgeResolution::Overlap);
+            assert_eq!(result.references[0].target_offset, None);
+        }
+    }
+
+    #[test]
+    fn runtime_segment_bases_and_register_pointers_are_not_static_data_evidence() {
+        for prefix in [0x64, 0x65] {
+            assert!(
+                analyze(&data_image(&[prefix, 0x8b, 0x05], 0x2000))
+                    .references
+                    .is_empty()
+            );
+        }
+        assert!(
+            analyze(&image(&[0x48, 0x8b, 0x00, 0xc3]))
+                .references
+                .is_empty()
+        );
+        // LEA ignores the segment base, unlike a memory load.
+        let result = analyze(&data_image(&[0x64, 0x48, 0x8d, 0x05], 0x2000));
+        assert_eq!(result.references[0].kind, ReferenceKind::DataAddress);
+    }
+
+    #[test]
+    fn data_references_obey_analysis_limits() {
+        let image = data_image(&[0x8b, 0x05], 0x2000);
+        let result = image
+            .analyze(
+                &Architecture::X86_64,
+                AnalysisLimits {
+                    max_bytes: 1,
+                    ..AnalysisLimits::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.instruction_count, 0);
+        assert!(result.references.is_empty());
     }
 
     #[test]
