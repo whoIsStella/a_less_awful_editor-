@@ -4,7 +4,7 @@
 Requires Python 3.9+, Linux x86-64, a C/C++ compiler, make, binutils, and zlib
 development files. Sources and generated files stay in --work-dir. Cached native
 binaries are reused; this is a fixture verification, not a reproducible-build
-attestation. See docs/systems-capabilities.md for the acceptance boundary.
+attestation. See tools/native-decompiler/README.md for supported inputs and limits.
 """
 
 import argparse

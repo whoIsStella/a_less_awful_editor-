@@ -3,7 +3,41 @@ use super::*;
 use crate::decompiler::{self, Decompiled};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const PAGE_LINES: usize = 120;
+const PAGE_LINES: usize = 32;
+const ROW_BYTES: usize = 256;
+
+struct DisplayRow {
+    range: std::ops::Range<usize>,
+    source_line: usize,
+    continuation: bool,
+}
+
+// Bound both shaping work and token elements, even for output without newlines.
+fn display_rows(text: &str) -> Vec<DisplayRow> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    for (source_line, line) in text.split_inclusive('\n').enumerate() {
+        let end = start + line.trim_end_matches('\n').len();
+        let mut cursor = start;
+        loop {
+            let mut stop = (cursor + ROW_BYTES).min(end);
+            while !text.is_char_boundary(stop) {
+                stop -= 1;
+            }
+            rows.push(DisplayRow {
+                range: cursor..stop,
+                source_line: source_line + 1,
+                continuation: cursor != start,
+            });
+            if stop == end {
+                break;
+            }
+            cursor = stop;
+        }
+        start += line.len();
+    }
+    rows
+}
 pub(super) struct DecompilerState {
     worker: Option<PathBuf>,
     result: Option<Decompiled>,
@@ -13,7 +47,7 @@ pub(super) struct DecompilerState {
     running: bool,
     status: String,
     page: usize,
-    lines: Vec<std::ops::Range<usize>>,
+    lines: Vec<DisplayRow>,
 }
 impl Default for DecompilerState {
     fn default() -> Self {
@@ -39,6 +73,16 @@ impl Drop for DecompilerState {
     }
 }
 impl Workbench {
+    fn set_pseudocode_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let last = self.decompiler.lines.len().saturating_sub(1) / PAGE_LINES;
+        let page = page.min(last);
+        if page != self.decompiler.page {
+            self.decompiler.page = page;
+            self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        }
+    }
+
     pub(super) fn invalidate_decompiler(&mut self) {
         if let Some(cancel) = self.decompiler.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
@@ -89,7 +133,12 @@ impl Workbench {
                 .find(|function| function.address == entry)
                 .ok_or_else(|| "Captured function is unavailable".to_owned())
                 .and_then(|function| {
-                    decompiler::decompile(&worker, &image, &analysis, function, &cancel)
+                    decompiler::decompile(&worker, &image, &analysis, function, &cancel).map(
+                        |result| {
+                            let rows = display_rows(&result.text);
+                            (result, rows)
+                        },
+                    )
                 })
         });
         cx.spawn(async move |this, cx| {
@@ -101,23 +150,13 @@ impl Workbench {
                 this.decompiler.running = false;
                 this.decompiler.cancel = None;
                 match result {
-                    Ok(result) => {
+                    Ok((result, rows)) => {
                         this.decompiler.status = format!(
                             "Native pseudocode · function {:x} · inferred types · {} diagnostics",
                             result.entry,
                             result.diagnostics.len()
                         );
-                        let mut start = 0;
-                        this.decompiler.lines = result
-                            .text
-                            .split_inclusive('\n')
-                            .map(|line| {
-                                let end = start + line.trim_end_matches('\n').len();
-                                let range = start..end;
-                                start += line.len();
-                                range
-                            })
-                            .collect();
+                        this.decompiler.lines = rows;
                         this.decompiler.result = Some(result);
                     }
                     Err(error) => this.decompiler.status = format!("Decompilation failed: {error}"),
@@ -181,7 +220,7 @@ impl Workbench {
         };
         root = root.child(div().px_3().py_2().text_size(px(11.0)).text_color(rgb(0x8590a3))
             .child("Recovered pseudocode, not original source. Click a mapped token to select its machine location; use Assembly or Bytes to inspect it."));
-        for (line_index, range) in self
+        for (line_index, row) in self
             .decompiler
             .lines
             .iter()
@@ -189,6 +228,7 @@ impl Workbench {
             .skip(self.decompiler.page * PAGE_LINES)
             .take(PAGE_LINES)
         {
+            let range = &row.range;
             let mut line = div()
                 .id(("pseudocode-line", line_index))
                 .flex()
@@ -201,7 +241,11 @@ impl Workbench {
                         .w(px(42.0))
                         .flex_shrink_0()
                         .text_color(rgb(0x59677c))
-                        .child(format!("{}", line_index + 1)),
+                        .child(if row.continuation {
+                            "↳".to_owned()
+                        } else {
+                            row.source_line.to_string()
+                        }),
                 );
             let first = result
                 .tokens
@@ -225,6 +269,7 @@ impl Workbench {
                 }
                 let mut span = div()
                     .id(("pseudocode-token", index))
+                    .debug_selector(|| format!("pseudocode-token-{line_index}-{index}"))
                     .flex_shrink_0()
                     .text_color(rgb(match token.kind.as_str() {
                         "type" => 0x7dcfff,
@@ -262,19 +307,15 @@ impl Workbench {
                 .p_2()
                 .gap_2()
                 .child(
-                    button("Previous lines").on_click(cx.listener(|this, _, _, cx| {
-                        this.decompiler.page = this.decompiler.page.saturating_sub(1);
-                        cx.notify();
+                    button("Previous rows").on_click(cx.listener(|this, _, _, cx| {
+                        this.set_pseudocode_page(this.decompiler.page.saturating_sub(1), cx);
                     })),
                 )
-                .child(button("Next lines").on_click(cx.listener(|this, _, _, cx| {
-                    if (this.decompiler.page + 1) * PAGE_LINES < this.decompiler.lines.len() {
-                        this.decompiler.page += 1;
-                    }
-                    cx.notify();
+                .child(button("Next rows").on_click(cx.listener(|this, _, _, cx| {
+                    this.set_pseudocode_page(this.decompiler.page.saturating_add(1), cx);
                 })))
                 .child(format!(
-                    "Page {} · {} lines",
+                    "Page {} · {} display rows",
                     self.decompiler.page + 1,
                     self.decompiler.lines.len()
                 )),
@@ -294,6 +335,122 @@ impl Workbench {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn display_rows_bound_long_unicode_output_without_losing_text() {
+        let text = format!("{}\n\nlast", "a🦀e\u{301}".repeat(100_000));
+        let rows = display_rows(&text);
+        assert!(rows.len() > PAGE_LINES);
+        for row in &rows {
+            assert!(row.range.len() <= ROW_BYTES);
+            assert!(text.is_char_boundary(row.range.start));
+            assert!(text.is_char_boundary(row.range.end));
+        }
+        let first_line: String = rows
+            .iter()
+            .filter(|r| r.source_line == 1)
+            .map(|r| &text[r.range.clone()])
+            .collect();
+        assert_eq!(first_line, text.split('\n').next().unwrap());
+        assert!(!rows[0].continuation);
+        assert!(rows[1].continuation);
+        let blank = rows.iter().find(|r| r.source_line == 2).unwrap();
+        assert!(blank.range.is_empty());
+        assert!(!blank.continuation);
+        assert_eq!(&text[rows.last().unwrap().range.clone()], "last");
+    }
+
+    #[test]
+    fn display_rows_keep_exact_boundaries_and_empty_output() {
+        assert!(display_rows("").is_empty());
+        let text = format!("{}\nnext\n", "x".repeat(ROW_BYTES));
+        let rows = display_rows(&text);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].range, 0..ROW_BYTES);
+        assert_eq!(rows[1].source_line, 2);
+        assert_eq!(&text[rows[1].range.clone()], "next");
+    }
+
+    #[gpui::test]
+    fn wrapped_token_click_keeps_mapping_across_pages(cx: &mut TestAppContext) {
+        let (image, _) = crate::decompiler::tests::fixture();
+        let (view, cx) =
+            cx.add_window_view(|_, cx| Workbench::new(PathBuf::from("fixture.elf"), image, cx));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.go(0x100, cx);
+                view.lens = Lens::Pseudocode;
+                let text = "é🦀".repeat(2000);
+                view.decompiler.lines = display_rows(&text);
+                view.decompiler.entry = Some(0x401000);
+                view.decompiler.result = Some(Decompiled {
+                    entry: 0x401000,
+                    tokens: vec![decompiler::Token {
+                        range: 0..text.len(),
+                        offset: Some(0x103),
+                        kind: "variable".into(),
+                    }],
+                    text,
+                    diagnostics: Vec::new(),
+                });
+            });
+        });
+        for (page, selector) in [(0, "pseudocode-token-0-0"), (1, "pseudocode-token-32-0")] {
+            cx.update(|_, cx| {
+                view.update(cx, |view, _| {
+                    view.decompiler.page = page;
+                    view.offset = 0x100;
+                })
+            });
+            cx.draw(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(1000.0), px(800.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("wrapped token was painted");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.update(|_, cx| {
+                view.update(cx, |view, _| {
+                    assert_eq!(view.offset, 0x103);
+                    assert!(view.decompiler.result.is_some());
+                    assert_eq!(view.decompiler.page, page);
+                })
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn page_change_reveals_start_and_preserves_machine_location(cx: &mut TestAppContext) {
+        let (image, _) = crate::decompiler::tests::fixture();
+        let (view, cx) =
+            cx.add_window_view(|_, cx| Workbench::new(PathBuf::from("fixture.elf"), image, cx));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.decompiler.lines = display_rows(&"line\n".repeat(PAGE_LINES + 1));
+                view.offset = 0x103;
+                let scrolled = gpui::point(px(-80.0), px(-120.0));
+                view.scroll.set_offset(scrolled);
+                view.set_pseudocode_page(1, cx);
+                assert_eq!(view.scroll.offset(), gpui::point(px(0.0), px(0.0)));
+                assert_eq!(view.offset, 0x103);
+                view.scroll.set_offset(scrolled);
+                view.set_pseudocode_page(usize::MAX, cx);
+                assert_eq!(view.decompiler.page, 1);
+                assert_eq!(
+                    view.scroll.offset(),
+                    scrolled,
+                    "last-page no-op retains scroll"
+                );
+                view.set_pseudocode_page(0, cx);
+                assert_eq!(view.scroll.offset(), gpui::point(px(0.0), px(0.0)));
+                assert_eq!(view.offset, 0x103);
+            })
+        });
+    }
 
     #[gpui::test]
     fn native_result_tracks_snapshot_location_and_cancellation(cx: &mut TestAppContext) {
