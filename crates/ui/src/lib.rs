@@ -1,4 +1,5 @@
 mod decompiler;
+mod explorer;
 mod persistence;
 pub mod prompts;
 mod systems;
@@ -20,6 +21,7 @@ actions!(
     document,
     [
         Open,
+        OpenFolder,
         Save,
         SaveAs,
         Close,
@@ -72,6 +74,12 @@ impl Panel {
 pub struct AppShell {
     editor: Entity<EditorView>,
     panel: Panel,
+    explorer_visible: bool,
+    explorer_root: Option<PathBuf>,
+    explorer_directory: Option<PathBuf>,
+    explorer_entries: Vec<explorer::Entry>,
+    explorer_request: u64,
+    explorer_note: String,
     path: Option<PathBuf>,
     disk: Option<DiskVersion>,
     busy: bool,
@@ -107,7 +115,13 @@ impl AppShell {
         });
         Self {
             editor,
-            panel: Panel::Terminal,
+            panel: Panel::Output,
+            explorer_visible: false,
+            explorer_root: None,
+            explorer_directory: None,
+            explorer_entries: Vec::new(),
+            explorer_request: 0,
+            explorer_note: "Choose a folder to browse files.".into(),
             path: None,
             disk: None,
             busy: false,
@@ -179,6 +193,99 @@ impl AppShell {
                 .background_executor()
                 .spawn(async move { persistence::load(&path) })
                 .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(loaded) => this.request_replace(Intent::Open(Box::new(loaded)), window, cx),
+                    Err(error) => this.failure(format!("Open failed: {error}"), window, cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = picker.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(Ok(Some(paths))) if paths.len() == 1 => {
+                        let path = paths[0].clone();
+                        this.explorer_root = Some(path.clone());
+                        this.explorer_directory = Some(path.clone());
+                        this.explorer_entries.clear();
+                        this.explorer_visible = true;
+                        this.load_folder(path, window, cx);
+                    }
+                    Ok(Ok(_)) => this.cancel("Folder selection cancelled", window, cx),
+                    error => this.failure(format!("Folder dialog failed: {error:?}"), window, cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn load_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.explorer_root.clone() else {
+            return;
+        };
+        self.explorer_request = self.explorer_request.wrapping_add(1);
+        let request = self.explorer_request;
+        self.explorer_note = "Loading folder...".into();
+        cx.notify();
+        let work_path = path.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { explorer::list(&root, &work_path) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = work.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                if request != this.explorer_request {
+                    return;
+                }
+                match result {
+                    Ok((entries, truncated)) => {
+                        this.explorer_directory = Some(path);
+                        this.explorer_entries = entries;
+                        this.explorer_note = if truncated {
+                            "Listing limited; some entries may be omitted."
+                        } else if this.explorer_entries.is_empty() {
+                            "This folder is empty."
+                        } else {
+                            "Select a file to open it."
+                        }
+                        .into();
+                    }
+                    Err(error) => this.explorer_note = format!("Cannot list folder: {error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_explorer_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.status = "Opening file...".into();
+        let work = cx
+            .background_executor()
+            .spawn(async move { persistence::load(&path) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
@@ -493,9 +600,13 @@ impl Render for AppShell {
                     this.panel = panel;
                     cx.notify();
                 }))
-        });
+        })
+        .collect::<Vec<_>>();
         div()
             .on_action(cx.listener(|this, _: &Open, window, cx| this.request_open(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenFolder, window, cx| this.choose_folder(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &Save, window, cx| this.save_active(false, window, cx)),
             )
@@ -553,6 +664,15 @@ impl Render for AppShell {
                             .text_color(rgb(0x8590a3))
                             .child("A Less Awful Editor"),
                     )
+                    .child(
+                        systems::button("Files").on_click(cx.listener(|this, _, _, cx| {
+                            this.explorer_visible = !this.explorer_visible;
+                            cx.notify();
+                        })),
+                    )
+                    .child(systems::button("Open Folder").on_click(
+                        cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
+                    ))
                     .child(
                         systems::button("Open").on_click(
                             cx.listener(|this, _, window, cx| this.request_open(window, cx)),
@@ -659,8 +779,8 @@ impl Render for AppShell {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.panels_visible && !self.systems_active, |row| {
-                        row.child(file_placeholder())
+                    .when(self.explorer_visible, |row| {
+                        row.child(self.explorer_view(cx))
                     })
                     .child(
                         div()
@@ -758,33 +878,102 @@ impl Render for AppShell {
     }
 }
 
-fn file_placeholder() -> Div {
-    div()
-        .w(px(170.0))
-        .flex_shrink_0()
-        .flex()
-        .flex_col()
-        .border_r_1()
-        .border_color(rgb(0x2a313c))
-        .bg(rgb(0x15191f))
-        .child(
-            div()
-                .h(px(28.0))
-                .flex()
-                .items_center()
-                .px_3()
-                .text_size(px(11.0))
-                .text_color(rgb(0xd4dce7))
-                .child("Files"),
-        )
-        .child(
-            div()
-                .px_3()
-                .py_2()
-                .text_size(px(11.0))
-                .text_color(rgb(0x8590a3))
-                .child("File navigation is not implemented yet."),
-        )
+impl AppShell {
+    fn explorer_view(&self, cx: &mut Context<Self>) -> Div {
+        let can_up = self
+            .explorer_root
+            .as_ref()
+            .zip(self.explorer_directory.as_ref())
+            .is_some_and(|(root, dir)| root != dir);
+        let rows = self
+            .explorer_entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let path = entry.path.clone();
+                let directory = entry.directory;
+                div()
+                    .id(("explorer-entry", index))
+                    .px_3()
+                    .py_1()
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .child(format!(
+                        "{} {}",
+                        if directory { "▸" } else { "·" },
+                        entry.name
+                    ))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if directory {
+                            this.load_folder(path.clone(), window, cx);
+                        } else {
+                            this.open_explorer_file(path.clone(), window, cx);
+                        }
+                    }))
+            });
+        div()
+            .w(px(220.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(rgb(0x2a313c))
+            .bg(rgb(0x15191f))
+            .child(div().px_3().py_2().text_color(rgb(0xd4dce7)).child("Files"))
+            .child(
+                systems::button("Open Folder")
+                    .on_click(cx.listener(|this, _, window, cx| this.choose_folder(window, cx))),
+            )
+            .when(self.explorer_directory.is_some(), |view| {
+                view.child(systems::button("Refresh").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        if let Some(path) = this.explorer_directory.clone() {
+                            this.load_folder(path, window, cx);
+                        }
+                    },
+                )))
+            })
+            .when(can_up, |view| {
+                view.child(systems::button("Up one folder").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        if let Some(parent) = this
+                            .explorer_directory
+                            .as_ref()
+                            .and_then(|p| p.parent())
+                            .map(|p| p.to_path_buf())
+                        {
+                            this.load_folder(parent, window, cx);
+                        }
+                    },
+                )))
+            })
+            .when_some(self.explorer_directory.as_ref(), |view, path| {
+                view.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(10.0))
+                        .truncate()
+                        .child(path.display().to_string()),
+                )
+            })
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(10.0))
+                    .text_color(rgb(0x8590a3))
+                    .child(self.explorer_note.clone()),
+            )
+            .child(
+                div()
+                    .id("explorer-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+    }
 }
 
 #[cfg(test)]
@@ -982,6 +1171,39 @@ mod tests {
         cx.run_until_parked();
         assert!(contents(&shell, cx).1);
     }
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn conflict_escape_then_cancel_save_as_preserves_external_file(cx: &mut TestAppContext) {
+        cx.update(prompts::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.simulate_input("local");
+        let dirty = contents(&shell, cx);
+        std::fs::write(&path, "external change").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"external change");
+        assert_eq!(contents(&shell, cx), dirty);
+        cx.dispatch_action(SaveAs);
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"external change");
+        assert_eq!(contents(&shell, cx), dirty);
+    }
+
     #[cfg(target_os = "linux")]
     #[gpui::test]
     fn linux_confirmation_escape_cancels_and_restores_input_focus(cx: &mut TestAppContext) {

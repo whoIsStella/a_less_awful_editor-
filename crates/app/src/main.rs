@@ -1,6 +1,6 @@
 use ale_ui::{
-    AppShell, Close, InspectBinary, Open, Quit, Save, SaveAs, ShowAssembly, ShowBytes, ShowEditor,
-    ShowOverview, TogglePanels,
+    AppShell, Close, InspectBinary, Open, OpenFolder, Quit, Save, SaveAs, ShowAssembly, ShowBytes,
+    ShowEditor, ShowOverview, TogglePanels,
 };
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
@@ -32,6 +32,7 @@ fn main() {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open", Open),
+                MenuItem::action("Open Folder", OpenFolder),
                 MenuItem::action("Inspect binary", InspectBinary),
                 MenuItem::action("Save", Save),
                 MenuItem::action("Save As", SaveAs),

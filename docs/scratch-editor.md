@@ -5,7 +5,14 @@ Save or Save As succeeds. A `*` in the document label and native title indicates
 unsaved edits. The label shows the full selected path; the title identifies the open document.
 
 Use Open to choose a file. The Output panel displays recoverable file errors.
-The editor does not include a file browser, terminal, Git client, or debugger.
+Use **Open Folder** to browse one folder at a time and **Files** to show or hide
+the sidebar. Select a subfolder to enter it, **Up one folder** to return, and
+**Refresh** after directory changes. Select a file to open it. Unsaved text
+prompts before replacement. The list shows at most 500 entries and skips
+symbolic links.
+
+The editor does not include an integrated terminal, language diagnostics,
+Git client, or debugger.
 
 ## Controls
 
