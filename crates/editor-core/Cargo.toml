@@ -1,0 +1,9 @@
+[package]
+name = "ale-editor-core"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ropey.workspace = true
+unicode-segmentation = "1.12"
