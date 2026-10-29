@@ -10,6 +10,7 @@ open when you switch to binary views. No account or cloud service is required.
 ## What you can do
 
 - Browse a selected folder and open its files.
+- Run a local shell in the integrated Terminal panel on Linux.
 - Edit and save UTF-8 text with Unicode navigation, selection, clipboard, and undo/redo.
 - Inspect ELF, PE, and Mach-O files with linked assembly, bytes, symbols, and strings.
 - Explore x86/x86-64 functions and control-flow graphs, and navigate to source when DWARF information is available.
@@ -51,6 +52,7 @@ Inspection and byte patching work without it.
 - **Ctrl+Shift+O** opens a binary for inspection.
 - **Ctrl+1** returns to your text; **Ctrl+2**, **Ctrl+3**, and **Ctrl+4** show binary overview, assembly, and bytes.
 - **Export copy** writes patched bytes to a new file.
+- **Terminal** starts your shell in the selected folder, or the open file’s parent. Click inside to type; Ctrl+C interrupts and Ctrl+Shift+V pastes.
 
 Read the [text editing guide](docs/scratch-editor.md),
 [binary workbench guide](docs/systems-workbench.md), or
@@ -68,7 +70,12 @@ after files change; open branches stay expanded. Directory listings show up to
 500 entries and exclude symbolic links. The tree limits cached folders, depth
 and visible rows to keep large projects bounded.
 
-There is no integrated terminal, language diagnostics, Git client, debugger,
+The Linux terminal supports a real PTY, window resize, bounded scrollback and
+shell restart. Output is currently monochrome, with whole-screen copy and no
+text selection or full input-method support. It starts in the chosen folder;
+changing the sidebar folder does not move an existing shell. Stop or closing
+the application hangs up the shell and foreground job; detached daemons are
+outside session cleanup. There are no language diagnostics, Git client, debugger,
 or syntax highlighting.
 Binary patches do not repair relocations, signatures, or checksums. Recovered
 pseudocode uses inferred names and types; it is not the original source.

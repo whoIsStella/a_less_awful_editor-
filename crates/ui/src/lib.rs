@@ -5,6 +5,7 @@ pub mod prompts;
 mod systems;
 mod systems_io;
 mod systems_shell;
+mod terminal;
 
 use ale_editor_core::TextSnapshot;
 use ale_editor_view::EditorView;
@@ -61,7 +62,7 @@ impl Panel {
 
     fn message(self) -> &'static str {
         match self {
-            Self::Terminal => "Terminal is not implemented yet. This is not a shell prompt.",
+            Self::Terminal => "Select Terminal to start a shell.",
             Self::Problems => "Language diagnostics are not connected yet.",
             Self::Debug => "No debug adapter is connected. Debugging is not implemented yet.",
             Self::Output => {
@@ -74,6 +75,7 @@ impl Panel {
 pub struct AppShell {
     editor: Entity<EditorView>,
     panel: Panel,
+    terminal: Option<Entity<terminal::Terminal>>,
     explorer_visible: bool,
     explorer_tree: explorer::Tree,
     explorer_selected: Option<PathBuf>,
@@ -113,6 +115,7 @@ impl AppShell {
         Self {
             editor,
             panel: Panel::Output,
+            terminal: None,
             explorer_visible: false,
             explorer_tree: explorer::Tree::default(),
             explorer_selected: None,
@@ -514,6 +517,28 @@ impl AppShell {
         })
         .detach();
     }
+    fn show_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panels_visible = true;
+        self.panel = Panel::Terminal;
+        if self.terminal.is_none() {
+            let directory = self
+                .explorer_tree
+                .root
+                .clone()
+                .or_else(|| {
+                    self.path
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.to_path_buf())
+                })
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            self.terminal = Some(cx.new(|cx| terminal::Terminal::new(directory, window, cx)));
+        } else if let Some(terminal) = &self.terminal {
+            terminal.read(cx).focus_handle(cx).focus(window);
+        }
+
+        cx.notify();
+    }
 }
 
 impl Render for AppShell {
@@ -552,7 +577,9 @@ impl Render for AppShell {
         ));
         // Keep room for the binary command bar, an expanded Details section,
         // and several data rows when the optional placeholder panel is open.
-        let panel_height = if self.systems_active {
+        let panel_height = if self.panel == Panel::Terminal {
+            (window.viewport_size().height * 0.4).clamp(px(180.0), px(400.0))
+        } else if self.systems_active {
             (window.viewport_size().height - px(420.0)).clamp(px(28.0), px(104.0))
         } else {
             px(104.0)
@@ -584,8 +611,11 @@ impl Render for AppShell {
                 .border_b_1()
                 .border_color(rgb(if active { 0x7aa2f7 } else { 0x15191f }))
                 .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.panel = panel;
+                    if panel == Panel::Terminal {
+                        this.show_terminal(window, cx);
+                    }
                     cx.notify();
                 }))
         })
@@ -671,6 +701,9 @@ impl Render for AppShell {
                     ))
                     .child(systems::button("Save").on_click(
                         cx.listener(|this, _, window, cx| this.save_active(false, window, cx)),
+                    ))
+                    .child(systems::button("Terminal").on_click(
+                        cx.listener(|this, _, window, cx| this.show_terminal(window, cx)),
                     ))
                     .child(
                         systems::button("Panels")
@@ -821,23 +854,30 @@ impl Render for AppShell {
                         .border_color(rgb(0x2a313c))
                         .bg(rgb(0x15191f))
                         .child(div().h(px(28.0)).flex_shrink_0().flex().children(tabs))
-                        .child(
-                            div()
-                                .id("panel-message")
-                                .flex_1()
+                        .child(div().when(self.panel == Panel::Terminal, |v| {
+                            v.flex_1()
                                 .min_h_0()
-                                .overflow_y_scroll()
-                                .px_3()
-                                .py_2()
-                                .text_size(px(11.0))
-                                .whitespace_normal()
-                                .text_color(rgb(0x8590a3))
-                                .child(if self.panel == Panel::Output {
-                                    self.status.clone()
-                                } else {
-                                    self.panel.message().into()
-                                }),
-                        ),
+                                .when_some(self.terminal.as_ref(), |v, t| v.child(t.clone()))
+                        }))
+                        .when(self.panel != Panel::Terminal, |view| {
+                            view.child(
+                                div()
+                                    .id("panel-message")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .px_3()
+                                    .py_2()
+                                    .text_size(px(11.0))
+                                    .whitespace_normal()
+                                    .text_color(rgb(0x8590a3))
+                                    .child(if self.panel == Panel::Output {
+                                        self.status.clone()
+                                    } else {
+                                        self.panel.message().into()
+                                    }),
+                            )
+                        }),
                 )
             })
             .child(
