@@ -201,16 +201,33 @@ impl AppShell {
         match intent {
             BinaryIntent::Close => cx.quit(),
             BinaryIntent::Open(path, image) => {
+                self.replacement_target = None;
                 let workbench = cx.new(|cx| Workbench::new(path, *image, cx));
                 cx.observe(&workbench, |_, _, cx| cx.notify()).detach();
                 cx.subscribe_in(
                     &workbench,
                     window,
-                    |this, _, event, window, cx| match event {
+                    |this, workbench, event, window, cx| match event {
                         WorkbenchEvent::Source(location) => {
                             this.request_source(location.clone(), window, cx)
                         }
                         WorkbenchEvent::Export => this.request_export(window, cx),
+                        WorkbenchEvent::RecoveredC {
+                            text,
+                            site,
+                            revision,
+                        } => this.request_replace(
+                            Intent::RecoveredC(
+                                text.clone(),
+                                ReplacementTarget {
+                                    workbench: workbench.entity_id(),
+                                    binary_revision: *revision,
+                                    site: site.clone(),
+                                },
+                            ),
+                            window,
+                            cx,
+                        ),
                     },
                 )
                 .detach();
@@ -293,7 +310,7 @@ impl AppShell {
             path.parent().unwrap_or(std::path::Path::new(".")),
             Some(&name),
         );
-        self.status = "Export to a NEW file; existing destinations are refused.".into();
+        self.status = if workbench.read(cx).executable_export() {"Export to a NEW owner-executable file (0700); original and existing destinations are untouched."}else{"Export to a NEW file; existing destinations are refused."}.into();
         cx.spawn_in(window, async move |this, cx| {
             let result = picker.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
@@ -314,10 +331,15 @@ impl AppShell {
             return;
         };
         let (image, revision) = workbench.read(cx).snapshot();
+        let executable = workbench.read(cx).executable_export();
         self.status = "Exporting captured binary snapshot...".into();
-        let work = cx
-            .background_executor()
-            .spawn(async move { systems_io::export_copy(&path, image.bytes()) });
+        let work = cx.background_executor().spawn(async move {
+            if executable {
+                systems_io::export_executable_copy(&path, image.bytes())
+            } else {
+                systems_io::export_copy(&path, image.bytes())
+            }
+        });
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {

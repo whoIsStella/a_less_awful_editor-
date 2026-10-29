@@ -2,6 +2,7 @@ mod decompiler;
 mod explorer;
 mod persistence;
 pub mod prompts;
+mod recompiler;
 mod systems;
 mod systems_io;
 mod systems_shell;
@@ -36,9 +37,17 @@ actions!(
     ]
 );
 
+#[derive(Clone)]
+struct ReplacementTarget {
+    workbench: gpui::EntityId,
+    binary_revision: u64,
+    site: ale_systems_core::recompile::ReplacementSite,
+}
+
 enum Intent {
     Open(Box<Loaded>),
     Source(Box<Loaded>, usize),
+    RecoveredC(String, ReplacementTarget),
     Close,
 }
 
@@ -81,6 +90,7 @@ pub struct AppShell {
     explorer_selected: Option<PathBuf>,
     path: Option<PathBuf>,
     disk: Option<DiskVersion>,
+    replacement_target: Option<ReplacementTarget>,
     busy: bool,
     pending: Option<Intent>,
     status: String,
@@ -121,6 +131,7 @@ impl AppShell {
             explorer_selected: None,
             path: None,
             disk: None,
+            replacement_target: None,
             busy: false,
             pending: None,
             status: "Untitled - not saved to disk".into(),
@@ -338,11 +349,39 @@ impl AppShell {
                 self.close_text_revision = Some(self.editor.read(cx).content_revision());
                 self.request_binary_replace(BinaryIntent::Close, window, cx);
             }
+            Intent::RecoveredC(text, target) => {
+                if !self.workbench.as_ref().is_some_and(|w| {
+                    w.entity_id() == target.workbench
+                        && w.read(cx).snapshot().1 == target.binary_revision
+                }) {
+                    self.cancel(
+                        "Binary changed; decompile the current snapshot again. Text retained.",
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+                if let Some(w) = &self.workbench {
+                    w.update(cx, |w, _| w.invalidate_compilation());
+                }
+                self.path = None;
+                self.disk = None;
+                self.editor.update(cx, |editor, cx| {
+                    editor.load(ale_editor_core::EditorBuffer::with_text(&text), cx)
+                });
+                self.replacement_target = Some(target);
+                self.systems_active = false;
+                self.finish("Edit recovered C, keep the original calling convention/signature, then Compile C. Save As can retain the C source separately.",window,cx);
+            }
             Intent::Open(_) | Intent::Source(_, _) => {
+                self.replacement_target = None;
+                if let Some(w) = &self.workbench {
+                    w.update(cx, |w, _| w.invalidate_compilation());
+                }
                 let (loaded, line) = match intent {
                     Intent::Open(loaded) => (loaded, None),
                     Intent::Source(loaded, line) => (loaded, Some(line)),
-                    Intent::Close => unreachable!(),
+                    _ => unreachable!(),
                 };
                 let Loaded {
                     path,
@@ -377,11 +416,16 @@ impl AppShell {
             .as_ref()
             .and_then(|path| path.parent())
             .unwrap_or(std::path::Path::new("."));
+        let recovered_name = self
+            .replacement_target
+            .as_ref()
+            .map(|target| format!("{}.c", target.site.name));
         let name = self
             .path
             .as_ref()
             .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
+            .or(recovered_name.as_deref())
             .unwrap_or("Untitled.txt");
         let picker = cx.prompt_for_new_path(directory, Some(name));
         self.status = "Choose a save destination...".into();
@@ -445,7 +489,9 @@ impl AppShell {
                                 Intent::Source(loaded, line) => {
                                     this.reload_for_open(loaded.path, Some(line), window, cx)
                                 }
-                                Intent::Close => this.request_replace(Intent::Close, window, cx),
+                                intent @ (Intent::Close | Intent::RecoveredC(..)) => {
+                                    this.request_replace(intent, window, cx)
+                                }
                             }
                         }
                     }
@@ -517,6 +563,38 @@ impl AppShell {
         })
         .detach();
     }
+    fn compile_replacement(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(target) = self.replacement_target.clone() else {
+            return;
+        };
+        let Some(workbench) = self.workbench.clone() else {
+            return;
+        };
+        if workbench.read(cx).is_compiling() {
+            workbench.update(cx, |w, _| w.invalidate_compilation());
+            self.status = "C compilation cancelled; documents retained.".into();
+            cx.notify();
+            return;
+        }
+        if workbench.entity_id() != target.workbench
+            || workbench.read(cx).snapshot().1 != target.binary_revision
+        {
+            self.status="The target binary changed. Decompile its current snapshot and edit that recovered C.".into();
+            cx.notify();
+            return;
+        }
+        self.editor.update(cx, |editor, _| {
+            editor.save_snapshot();
+        });
+        workbench.update(cx, |w, cx| {
+            w.compile_replacement(target.site, self.editor.clone(), cx)
+        });
+        self.systems_active = true;
+        cx.notify();
+    }
     fn show_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.panels_visible = true;
         self.panel = Panel::Terminal;
@@ -550,6 +628,11 @@ impl Render for AppShell {
             .as_ref()
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| {
+                self.replacement_target
+                    .as_ref()
+                    .map(|target| format!("{}.c", target.site.name))
+            })
             .unwrap_or_else(|| "Untitled".into());
         let binary = self.workbench.as_ref().map(|workbench| {
             let workbench = workbench.read(cx);
@@ -702,6 +785,22 @@ impl Render for AppShell {
                     .child(systems::button("Save").on_click(
                         cx.listener(|this, _, window, cx| this.save_active(false, window, cx)),
                     ))
+                    .when(self.replacement_target.is_some(), |v| {
+                        v.child(
+                            systems::button(
+                                if self
+                                    .workbench
+                                    .as_ref()
+                                    .is_some_and(|w| w.read(cx).is_compiling())
+                                {
+                                    "Cancel compile"
+                                } else {
+                                    "Compile C"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.compile_replacement(cx))),
+                        )
+                    })
                     .child(systems::button("Terminal").on_click(
                         cx.listener(|this, _, window, cx| this.show_terminal(window, cx)),
                     ))
@@ -1253,5 +1352,52 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.simulate_input("y");
         assert_eq!(contents(&shell, cx), (b"keepxy".to_vec(), true));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[gpui::test]
+    fn recovered_c_keeps_existing_text_on_cancel_and_uses_text_lifecycle(cx: &mut TestAppContext) {
+        let (_dir, path, image, site) = crate::recompiler::tests::fixture();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.simulate_input("keep my unsaved source");
+        let target = cx.update(|_, cx| {
+            shell.update(cx, |shell, cx| {
+                let workbench = cx.new(|cx| Workbench::new(path, image, cx));
+                let target = ReplacementTarget {
+                    workbench: workbench.entity_id(),
+                    binary_revision: 0,
+                    site,
+                };
+                shell.workbench = Some(workbench);
+                target
+            })
+        });
+        let recovered = "int roundtrip(int x){return x+1;}";
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.request_replace(
+                    Intent::RecoveredC(recovered.into(), target.clone()),
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(contents(&shell, cx).0, b"keep my unsaved source");
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.request_replace(Intent::RecoveredC(recovered.into(), target), window, cx)
+            })
+        });
+        cx.simulate_prompt_answer("Discard");
+        cx.run_until_parked();
+        assert_eq!(contents(&shell, cx).0, recovered.as_bytes());
+        cx.simulate_input(" ");
+        cx.dispatch_action(Close);
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(contents(&shell, cx).1);
     }
 }

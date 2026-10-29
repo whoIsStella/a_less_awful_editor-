@@ -14,6 +14,9 @@ use analysis::AnalysisState;
 #[path = "systems_decompiler.rs"]
 mod native_decompiler;
 use native_decompiler::DecompilerState;
+#[path = "systems_recompile.rs"]
+mod native_recompile;
+use native_recompile::Compilation;
 
 #[cfg(test)]
 #[path = "systems_tests.rs"]
@@ -70,6 +73,11 @@ impl Command {
 pub(crate) enum WorkbenchEvent {
     Source(SourceLocation),
     Export,
+    RecoveredC {
+        text: String,
+        site: ale_systems_core::recompile::ReplacementSite,
+        revision: u64,
+    },
 }
 
 pub(crate) struct Workbench {
@@ -103,6 +111,8 @@ pub(crate) struct Workbench {
     scroll: gpui::ScrollHandle,
     analysis: AnalysisState,
     decompiler: DecompilerState,
+    compilation: Compilation,
+    executable_export: bool,
 }
 impl EventEmitter<WorkbenchEvent> for Workbench {}
 impl Focusable for Workbench {
@@ -188,6 +198,8 @@ impl Workbench {
             scroll: gpui::ScrollHandle::new(),
             analysis: AnalysisState::default(),
             decompiler: DecompilerState::default(),
+            compilation: Compilation::default(),
+            executable_export: false,
         };
         this.decode();
         this.refresh_entropy(cx);
@@ -196,6 +208,12 @@ impl Workbench {
     }
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
+    }
+    pub fn executable_export(&self) -> bool {
+        self.executable_export
+    }
+    pub fn is_compiling(&self) -> bool {
+        self.compilation.running
     }
     pub fn is_busy(&self) -> bool {
         self.busy
@@ -251,6 +269,7 @@ impl Workbench {
                 self.back.remove(0);
             }
         }
+        self.invalidate_compilation();
         self.offset = offset;
         self.decompiler_location_changed();
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
@@ -328,7 +347,7 @@ impl Workbench {
         if self.busy {
             return;
         }
-        self.preview = None;
+        self.invalidate_compilation();
         let text = self.input.read(cx).text();
         if text.len() > 4096 {
             self.message = "Command is too long (maximum 4096 UTF-8 bytes).".into();
@@ -426,6 +445,7 @@ impl Workbench {
                             bytes.len(),
                             self.offset
                         );
+                        self.invalidate_compilation();
                         self.preview = Some((self.offset, bytes, self.revision));
                     }
                     _ => {
@@ -435,6 +455,7 @@ impl Workbench {
                 }
             }
             Command::Assemble => {
+                self.invalidate_compilation();
                 let bitness = match self.architecture {
                     Architecture::X86 => 32,
                     Architecture::X86_64 => 64,
@@ -485,6 +506,14 @@ impl Workbench {
         if self.busy {
             return;
         }
+        if let Some((source, revision)) = &self.compilation.source {
+            if source.read(cx).content_revision() != *revision {
+                self.invalidate_compilation();
+                self.message = "C source changed; compile a new preview before applying.".into();
+                cx.notify();
+                return;
+            }
+        }
         let Some((offset, bytes, revision)) = self.preview.take() else {
             return;
         };
@@ -503,6 +532,7 @@ impl Workbench {
             cx.notify();
             return;
         }
+        let native_replacement = self.compilation.source.is_some();
         let image = self.image.clone();
         self.busy = true;
         let work = cx
@@ -512,6 +542,7 @@ impl Workbench {
             this.busy = false;
             match result {
                 Ok(image) => {
+                    this.executable_export |= native_replacement;
                     this.undo.push((this.revision,this.image.clone()));
                     while this.undo.len() > 32 || this.undo.iter().map(|(_,image)|image.bytes().len()).sum::<usize>() > 128*1024*1024 { this.undo.remove(0); }
                     this.redo.clear(); this.image = Arc::new(image); this.revision = this.next_revision; this.next_revision += 1;

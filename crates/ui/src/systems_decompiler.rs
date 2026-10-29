@@ -40,7 +40,7 @@ fn display_rows(text: &str) -> Vec<DisplayRow> {
 }
 pub(super) struct DecompilerState {
     worker: Option<PathBuf>,
-    result: Option<Decompiled>,
+    pub(super) result: Option<Decompiled>,
     entry: Option<u64>,
     generation: u64,
     cancel: Option<Arc<AtomicBool>>,
@@ -194,6 +194,10 @@ impl Workbench {
                             this.start_decompiler(cx);
                         }
                     })),
+                )
+                .child(
+                    button("Edit recovered C")
+                        .on_click(cx.listener(|this, _, _, cx| this.edit_recovered_c(cx))),
                 )
                 .child(button("Copy code").on_click(cx.listener(|this, _, _, cx| {
                     if let Some(result) = &this.decompiler.result {

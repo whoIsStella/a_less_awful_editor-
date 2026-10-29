@@ -13,6 +13,7 @@ use object::{Object, ObjectSection, ObjectSymbol};
 mod analysis;
 mod dwarf;
 mod memory;
+pub mod recompile;
 pub use analysis::{
     Analysis, AnalysisLimits, AnalyzedFunction, BasicBlock, CrossReference, EdgeKind,
     EdgeResolution, FlowEdge, FunctionProvenance, ReferenceKind,

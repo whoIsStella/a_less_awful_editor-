@@ -28,6 +28,7 @@ impl Drop for AnalysisState {
 impl Workbench {
     pub(super) fn refresh_analysis(&mut self, cx: &mut Context<Self>) {
         self.invalidate_decompiler();
+        self.invalidate_compilation();
         self.cancel_analysis(cx);
         self.analysis.result = None;
         self.analysis.running = true;

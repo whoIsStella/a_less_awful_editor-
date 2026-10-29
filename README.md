@@ -1,10 +1,11 @@
 # A Less Awful Editor
 
-A native, local-first text editor and binary workbench for programmers who want
-to edit source code and inspect compiled files in one workspace.
+A native systems-programming and reverse-engineering workbench for working
+across source code, recovered C, assembly and executable bytes. The wider goal
+includes hardware logic, firmware, OS development and language/toolchain design.
 
-Edit UTF-8 text, follow machine instructions, inspect bytes and control flow,
-and preview binary patches before exporting a separate copy. Your text stays
+Edit source and recovered code, inspect machine instructions and control flow,
+and preview rebuilt functions or byte patches before exporting a separate copy. Your text stays
 open when you switch to binary views. No account or cloud service is required.
 
 ## What you can do
@@ -15,7 +16,8 @@ open when you switch to binary views. No account or cloud service is required.
 - Inspect ELF, PE, and Mach-O files with linked assembly, bytes, symbols, and strings.
 - Explore x86/x86-64 functions and control-flow graphs, and navigate to source when DWARF information is available.
 - Preview instruction or byte edits, undo patches, and export to a new file without overwriting the original.
-- View recovered pseudocode for supported Linux x86-64 binaries with the optional native decompiler.
+- Recover pseudocode with the native decompiler and edit it as C.
+- Compile and preview supported standalone C function replacements for named Linux x86-64 ELF functions, then export a separate executable copy.
 
 ![Assembly view with linked binary navigation](docs/screenshots/workbench-assembly.png)
 
@@ -56,7 +58,8 @@ Inspection and byte patching work without it.
 
 Read the [text editing guide](docs/scratch-editor.md),
 [binary workbench guide](docs/systems-workbench.md), or
-[optional decompiler setup](tools/native-decompiler/README.md) for controls and supported inputs.
+[native function round trip](docs/native-roundtrip.md), and
+[decompiler setup](tools/native-decompiler/README.md) for controls and supported inputs.
 
 ## Practical limits
 
@@ -79,3 +82,8 @@ outside session cleanup. There are no language diagnostics, Git client, debugger
 or syntax highlighting.
 Binary patches do not repair relocations, signatures, or checksums. Recovered
 pseudocode uses inferred names and types; it is not the original source.
+
+Native recompilation currently uses fixed-size leaf-function placement. Growing
+functions, relocation-aware calls/data, stronger ABI recovery, other targets,
+hardware toolchains and language-design tooling require further implementation.
+See the round-trip guide before editing recovered code.
