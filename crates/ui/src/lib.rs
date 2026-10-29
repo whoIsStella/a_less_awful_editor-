@@ -75,11 +75,8 @@ pub struct AppShell {
     editor: Entity<EditorView>,
     panel: Panel,
     explorer_visible: bool,
-    explorer_root: Option<PathBuf>,
-    explorer_directory: Option<PathBuf>,
-    explorer_entries: Vec<explorer::Entry>,
-    explorer_request: u64,
-    explorer_note: String,
+    explorer_tree: explorer::Tree,
+    explorer_selected: Option<PathBuf>,
     path: Option<PathBuf>,
     disk: Option<DiskVersion>,
     busy: bool,
@@ -117,11 +114,8 @@ impl AppShell {
             editor,
             panel: Panel::Output,
             explorer_visible: false,
-            explorer_root: None,
-            explorer_directory: None,
-            explorer_entries: Vec::new(),
-            explorer_request: 0,
-            explorer_note: "Choose a folder to browse files.".into(),
+            explorer_tree: explorer::Tree::default(),
+            explorer_selected: None,
             path: None,
             disk: None,
             busy: false,
@@ -222,9 +216,8 @@ impl AppShell {
                 match result {
                     Ok(Ok(Some(paths))) if paths.len() == 1 => {
                         let path = paths[0].clone();
-                        this.explorer_root = Some(path.clone());
-                        this.explorer_directory = Some(path.clone());
-                        this.explorer_entries.clear();
+                        this.explorer_tree.reset(path.clone());
+                        this.explorer_selected = None;
                         this.explorer_visible = true;
                         this.load_folder(path, window, cx);
                     }
@@ -237,37 +230,32 @@ impl AppShell {
     }
 
     fn load_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.explorer_root.clone() else {
+        self.load_folders(vec![path], window, cx);
+    }
+
+    fn load_folders(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.explorer_tree.root.clone() else {
             return;
         };
-        self.explorer_request = self.explorer_request.wrapping_add(1);
-        let request = self.explorer_request;
-        self.explorer_note = "Loading folder...".into();
+        let requests: Vec<_> = paths
+            .into_iter()
+            .filter_map(|path| self.explorer_tree.begin(&path).map(|token| (path, token)))
+            .collect();
         cx.notify();
-        let work_path = path.clone();
-        let work = cx
-            .background_executor()
-            .spawn(async move { explorer::list(&root, &work_path) });
+        let work = cx.background_executor().spawn(async move {
+            requests
+                .into_iter()
+                .map(|(path, token)| {
+                    let result = explorer::list(&root, &path);
+                    (path, token, result)
+                })
+                .collect::<Vec<_>>()
+        });
         cx.spawn_in(window, async move |this, cx| {
-            let result = work.await;
+            let results = work.await;
             let _ = this.update_in(cx, |this, _, cx| {
-                if request != this.explorer_request {
-                    return;
-                }
-                match result {
-                    Ok((entries, truncated)) => {
-                        this.explorer_directory = Some(path);
-                        this.explorer_entries = entries;
-                        this.explorer_note = if truncated {
-                            "Listing limited; some entries may be omitted."
-                        } else if this.explorer_entries.is_empty() {
-                            "This folder is empty."
-                        } else {
-                            "Select a file to open it."
-                        }
-                        .into();
-                    }
-                    Err(error) => this.explorer_note = format!("Cannot list folder: {error}"),
+                for (path, token, result) in results {
+                    this.explorer_tree.finish(&path, token, result);
                 }
                 cx.notify();
             });
@@ -880,39 +868,65 @@ impl Render for AppShell {
 
 impl AppShell {
     fn explorer_view(&self, cx: &mut Context<Self>) -> Div {
-        let can_up = self
-            .explorer_root
-            .as_ref()
-            .zip(self.explorer_directory.as_ref())
-            .is_some_and(|(root, dir)| root != dir);
         let rows = self
-            .explorer_entries
-            .iter()
+            .explorer_tree
+            .rows()
+            .into_iter()
             .enumerate()
-            .map(|(index, entry)| {
-                let path = entry.path.clone();
-                let directory = entry.directory;
+            .map(|(index, row)| {
+                let selected = if row.directory {
+                    self.explorer_selected.as_ref() == Some(&row.path)
+                } else {
+                    self.path.as_ref() == Some(&row.path)
+                };
+                let path = row.path.clone();
                 div()
                     .id(("explorer-entry", index))
-                    .px_3()
-                    .py_1()
-                    .cursor_pointer()
+                    .min_w(px(160.0 + row.depth as f32 * 14.0))
+                    .h(px(25.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .pl(px(12.0 + row.depth as f32 * 14.0))
+                    .pr_2()
+                    .gap_1()
                     .text_size(px(12.0))
-                    .child(format!(
-                        "{} {}",
-                        if directory { "▸" } else { "·" },
-                        entry.name
-                    ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if directory {
-                            this.load_folder(path.clone(), window, cx);
-                        } else {
-                            this.open_explorer_file(path.clone(), window, cx);
-                        }
+                    .bg(rgb(if selected && !row.note {
+                        0x233044
+                    } else {
+                        0x15191f
                     }))
-            });
+                    .text_color(rgb(if row.note { 0x8590a3 } else { 0xd4dce7 }))
+                    .when(!row.note, |view| view.cursor_pointer())
+                    .child(
+                        div()
+                            .w(px(12.0))
+                            .flex_shrink_0()
+                            .text_color(rgb(0x8590a3))
+                            .child(if row.directory {
+                                if row.expanded { "▾" } else { "▸" }
+                            } else {
+                                ""
+                            }),
+                    )
+                    .child(div().min_w_0().truncate().child(row.name))
+                    .when(!row.note, |view| {
+                        view.on_click(cx.listener(move |this, _, window, cx| {
+                            this.explorer_selected = Some(path.clone());
+                            if row.directory {
+                                if this.explorer_tree.toggle(&path) {
+                                    this.load_folder(path.clone(), window, cx);
+                                }
+                                cx.notify();
+                            } else {
+                                this.open_explorer_file(path.clone(), window, cx);
+                            }
+                        }))
+                    })
+            })
+            .collect::<Vec<_>>();
         div()
-            .w(px(220.0))
+            .w(px(240.0))
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -921,56 +935,36 @@ impl AppShell {
             .bg(rgb(0x15191f))
             .child(div().px_3().py_2().text_color(rgb(0xd4dce7)).child("Files"))
             .child(
-                systems::button("Open Folder")
-                    .on_click(cx.listener(|this, _, window, cx| this.choose_folder(window, cx))),
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(systems::button("Open Folder").on_click(
+                        cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
+                    ))
+                    .when(self.explorer_tree.root.is_some(), |view| {
+                        view.child(systems::button("Refresh").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                let paths = this.explorer_tree.refresh();
+                                this.load_folders(paths, window, cx);
+                            },
+                        )))
+                    }),
             )
-            .when(self.explorer_directory.is_some(), |view| {
-                view.child(systems::button("Refresh").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        if let Some(path) = this.explorer_directory.clone() {
-                            this.load_folder(path, window, cx);
-                        }
-                    },
-                )))
-            })
-            .when(can_up, |view| {
-                view.child(systems::button("Up one folder").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        if let Some(parent) = this
-                            .explorer_directory
-                            .as_ref()
-                            .and_then(|p| p.parent())
-                            .map(|p| p.to_path_buf())
-                        {
-                            this.load_folder(parent, window, cx);
-                        }
-                    },
-                )))
-            })
-            .when_some(self.explorer_directory.as_ref(), |view, path| {
+            .when(self.explorer_tree.root.is_none(), |view| {
                 view.child(
                     div()
                         .px_3()
-                        .py_1()
-                        .text_size(px(10.0))
-                        .truncate()
-                        .child(path.display().to_string()),
+                        .py_2()
+                        .text_color(rgb(0x8590a3))
+                        .child("Open a folder to browse your files."),
                 )
             })
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_size(px(10.0))
-                    .text_color(rgb(0x8590a3))
-                    .child(self.explorer_note.clone()),
-            )
             .child(
                 div()
                     .id("explorer-list")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .overflow_scroll()
                     .children(rows),
             )
     }

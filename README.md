@@ -62,9 +62,11 @@ Text files must be regular UTF-8 files no larger than 16 MiB; binary inspection
 accepts files up to 64 MiB. Symlink paths are rejected. Overwriting existing text
 files is supported on Linux; use Save As to a new file on other systems.
 
-The folder browser shows one directory at a time, up to 500 entries, and excludes
-symbolic links. Use Refresh after files change. It does not provide a full
-project tree.
+The Files sidebar is an expandable tree. Select a folder to expand or collapse
+its children while keeping parent folders and siblings visible. Use Refresh
+after files change; open branches stay expanded. Directory listings show up to
+500 entries and exclude symbolic links. The tree limits cached folders, depth
+and visible rows to keep large projects bounded.
 
 There is no integrated terminal, language diagnostics, Git client, debugger,
 or syntax highlighting.

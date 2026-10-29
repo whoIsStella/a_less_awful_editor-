@@ -5,11 +5,18 @@ Save or Save As succeeds. A `*` in the document label and native title indicates
 unsaved edits. The label shows the full selected path; the title identifies the open document.
 
 Use Open to choose a file. The Output panel displays recoverable file errors.
-Use **Open Folder** to browse one folder at a time and **Files** to show or hide
-the sidebar. Select a subfolder to enter it, **Up one folder** to return, and
-**Refresh** after directory changes. Select a file to open it. Unsaved text
-prompts before replacement. The list shows at most 500 entries and skips
-symbolic links.
+Use **Open Folder** to select a root and **Files** to show or hide its tree.
+Click a folder's row or disclosure arrow to expand or collapse its children.
+Parent folders and siblings remain visible. Open a text file by selecting its
+row; the current file is highlighted. Unsaved text prompts before replacement.
+**Refresh** reloads open branches without collapsing them. Expansion is retained
+while browsing in this session, but is not saved across restarts.
+
+The tree reads directories in the background as you expand them. Loading,
+empty-folder and read-error messages appear below the affected folder.
+Symbolic links are skipped. Limits are 500 entries per directory, 128 cached
+folders, 32 levels of nesting and 2,500 visible rows. Collapse folders and refresh
+to free the folder cache when its limit is reached.
 
 The editor does not include an integrated terminal, language diagnostics,
 Git client, or debugger.
