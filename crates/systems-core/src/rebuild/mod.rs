@@ -170,3 +170,70 @@ mod layout;
 
 mod metadata;
 pub use metadata::RewriteLocation;
+
+mod writer;
+
+mod validate;
+
+/// Build an immutable replacement candidate without modifying the input image.
+pub fn plan_replacement(
+    image: &BinaryImage,
+    site: &ReplacementSite,
+    unit: &RelocatableUnit,
+    options: RebuildOptions,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<ReplacementPlan, RebuildError> {
+    use std::sync::atomic::Ordering;
+    let check = || {
+        if cancel.load(Ordering::Relaxed) {
+            Err(RebuildError {
+                code: RebuildErrorCode::Cancelled,
+                detail: "Replacement planning cancelled".into(),
+            })
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
+    if unit.function_name != site.name {
+        return Err(RebuildError {
+            code: RebuildErrorCode::UnsupportedObject,
+            detail: "Compiled function does not match the selected site".into(),
+        });
+    }
+    if options.mode == PlacementMode::FixedSpan {
+        let bytes = site.replacement(&unit.raw).map_err(|detail| RebuildError {
+            code: RebuildErrorCode::UnsupportedObject,
+            detail,
+        })?;
+        return ReplacementPlan::from_fixed(image, site, bytes);
+    }
+    let original = elf::inspect_image(image, site, &options.limits)?;
+    check()?;
+    let placement = layout::plan_layout(&original, unit, &options.limits)?;
+    check()?;
+    let resolved = relocate::resolve_unit(unit, &original, &placement, cancel)?;
+    check()?;
+    let bytes =
+        writer::write_candidate_with_cancel(image, &original, &placement, &resolved, cancel)?;
+    check()?;
+    let candidate = validate::validate_candidate_with_cancel(
+        image, &original, &placement, &resolved, &bytes, cancel,
+    )?;
+    check()?;
+    let original_span =
+        site.offset
+            ..site
+                .offset
+                .checked_add(site.capacity)
+                .ok_or_else(|| RebuildError {
+                    code: RebuildErrorCode::InvalidLayout,
+                    detail: "Entry range overflow".into(),
+                })?;
+    let summary=PlanSummary {mode:PlacementMode::Relocated,entry_address:site.address,body_address:placement.body_address,original_span,body_span:placement.text_file.clone(),rodata_bytes:unit.sections.iter().filter(|s|s.kind==unit::UnitSectionKind::ReadOnlyData).map(|s|s.bytes.len()).sum(),changed_original_ranges:placement.changed_original_ranges.clone(),appended_bytes:bytes.len()-image.bytes().len(),relocations:resolved.relocations,warnings:vec!["ABI compatibility and unknown computed interior entries are not proven; injected code has no unwind metadata.".into()]};
+    Ok(ReplacementPlan {
+        base: Arc::clone(&image.bytes),
+        candidate,
+        summary,
+    })
+}

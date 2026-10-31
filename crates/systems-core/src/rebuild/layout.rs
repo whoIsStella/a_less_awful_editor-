@@ -6,9 +6,16 @@ use super::{
     unit::{RelocatableUnit, UnitSectionKind},
 };
 use std::{collections::BTreeMap, ops::Range};
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SectionPlacement {
+    pub(super) index: u32,
+    pub(super) kind: UnitSectionKind,
+    pub(super) alignment: u64,
+}
 #[derive(Debug, Default, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(super) struct AppendLayout {
+    pub(super) placed_sections: Vec<SectionPlacement>,
     pub(super) section_addresses: BTreeMap<u32, u64>,
     pub(super) section_files: BTreeMap<u32, Range<usize>>,
     pub(super) body_address: u64,
@@ -212,7 +219,23 @@ pub(super) fn plan_layout(
         .offset
         .checked_add(original.site.capacity)
         .ok_or_else(too_large)?;
+    let mut placed_sections = vec![SectionPlacement {
+        index: text.index,
+        kind: text.kind,
+        alignment: text.alignment,
+    }];
+    placed_sections.extend(
+        unit.sections
+            .iter()
+            .filter(|s| s.kind == UnitSectionKind::ReadOnlyData)
+            .map(|s| SectionPlacement {
+                index: s.index,
+                kind: s.kind,
+                alignment: s.alignment,
+            }),
+    );
     Ok(AppendLayout {
+        placed_sections,
         section_addresses,
         section_files,
         body_address,

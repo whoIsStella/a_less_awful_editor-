@@ -325,6 +325,86 @@ pub(super) fn inspect_image(
         code: RebuildErrorCode::InvalidLayout,
         detail: e.to_string(),
     })?;
+    let selected_end = site.offset.checked_add(site.capacity).ok_or_else(|| {
+        error(
+            RebuildErrorCode::InvalidLayout,
+            "Selected file range overflow",
+        )
+    })?;
+    let selected_range = site.offset..selected_end;
+    let overlaps =
+        |a: &std::ops::Range<usize>, b: &std::ops::Range<usize>| a.start < b.end && b.start < a.end;
+    let phdr_end = phoff
+        .checked_add(phnum.checked_mul(56).ok_or_else(|| {
+            error(
+                RebuildErrorCode::InvalidLayout,
+                "Program header size overflow",
+            )
+        })?)
+        .ok_or_else(|| {
+            error(
+                RebuildErrorCode::InvalidLayout,
+                "Program header end overflow",
+            )
+        })?;
+    let shdr_end = shoff
+        .checked_add(shnum.checked_mul(64).ok_or_else(|| {
+            error(
+                RebuildErrorCode::InvalidLayout,
+                "Section header size overflow",
+            )
+        })?)
+        .ok_or_else(|| {
+            error(
+                RebuildErrorCode::InvalidLayout,
+                "Section header end overflow",
+            )
+        })?;
+    if overlaps(&selected_range, &(0..64))
+        || overlaps(&selected_range, &(phoff..phdr_end))
+        || overlaps(&selected_range, &(shoff..shdr_end))
+    {
+        return Err(error(
+            RebuildErrorCode::Overlap,
+            "Selected function overlaps ELF header tables",
+        ));
+    }
+    let owner = file
+        .symbols()
+        .find(|s| {
+            s.kind() == object::SymbolKind::Text
+                && s.address() == site.address
+                && s.name().ok() == Some(site.name.as_str())
+        })
+        .and_then(|s| s.section_index())
+        .ok_or_else(|| {
+            error(
+                RebuildErrorCode::InvalidLayout,
+                "Selected symbol has no section",
+            )
+        })?;
+    for section in file.sections() {
+        if section.index() == owner {
+            continue;
+        }
+        if let Some((offset, size)) = section.file_range() {
+            let start = usize::try_from(offset)
+                .map_err(|_| error(RebuildErrorCode::InvalidLayout, "Section offset overflow"))?;
+            let end = start
+                .checked_add(
+                    usize::try_from(size).map_err(|_| {
+                        error(RebuildErrorCode::InvalidLayout, "Section size overflow")
+                    })?,
+                )
+                .ok_or_else(|| error(RebuildErrorCode::InvalidLayout, "Section range overflow"))?;
+            if size > 0 && overlaps(&selected_range, &(start..end)) {
+                return Err(error(
+                    RebuildErrorCode::Overlap,
+                    "Selected function overlaps another section",
+                ));
+            }
+        }
+    }
     for symbol in file.symbols().chain(file.dynamic_symbols()) {
         if !symbol.is_undefined()
             && symbol.kind() == object::SymbolKind::Text
@@ -627,3 +707,6 @@ pub(super) fn check_notes(bytes: &[u8]) -> Result<(), RebuildError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub(super) use super::writer::write_candidate;

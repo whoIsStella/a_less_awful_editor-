@@ -1247,3 +1247,210 @@ fn layout_handles_no_rodata_and_rejects_alignment_headers_and_reachability() {
         RebuildErrorCode::TooLarge
     );
 }
+
+fn writer_fixture() -> (
+    BinaryImage,
+    ReplacementSite,
+    super::layout::AppendLayout,
+    super::relocate::ResolvedUnit,
+) {
+    use std::sync::atomic::AtomicBool;
+    let (image, site) = loadable_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let mut bytes = object_fixture();
+    bytes[0x100..0x108].copy_from_slice(&[0xb8, 2, 0, 0, 0, 0xc3, 0xc3, 0xc3]);
+    let unit = RelocatableUnit::parse(
+        &bytes,
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let plan = super::layout::plan_layout(&original, &unit, &RebuildLimits::default()).unwrap();
+    let resolved =
+        super::relocate::resolve_unit(&unit, &original, &plan, &AtomicBool::new(false)).unwrap();
+    (image, site, plan, resolved)
+}
+#[test]
+fn writer_preserves_original_prefix_outside_whitelist() {
+    let (image, site, plan, resolved) = writer_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let candidate = super::elf::write_candidate(&image, &original, &plan, &resolved).unwrap();
+    assert_eq!(candidate.len(), plan.output_len);
+    for (offset, (before, after)) in image.bytes().iter().zip(&candidate).enumerate() {
+        if before != after {
+            assert!(
+                plan.changed_original_ranges
+                    .iter()
+                    .any(|r| r.contains(&offset)),
+                "unexpected byte at {offset:#x}"
+            );
+        }
+    }
+    assert_eq!(
+        &candidate[site.offset..site.offset + site.capacity],
+        plan.detour
+    );
+    let parsed = BinaryImage::parse(candidate).unwrap();
+    assert_eq!(
+        parsed.address_to_offset(plan.body_address),
+        Some(plan.text_file.start)
+    );
+}
+
+#[test]
+fn writer_validator_rejects_prefix_header_and_segment_corruption() {
+    let (image, site, plan, resolved) = writer_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let candidate = super::elf::write_candidate(&image, &original, &plan, &resolved).unwrap();
+    assert!(
+        super::validate::validate_candidate(&image, &original, &plan, &resolved, &candidate)
+            .is_ok()
+    );
+    for offset in [0x300, 0x20, plan.phdr_file.start + 4, plan.text_file.start] {
+        let mut bad = candidate.clone();
+        bad[offset] ^= 0x80;
+        assert!(
+            super::validate::validate_candidate(&image, &original, &plan, &resolved, &bad).is_err(),
+            "offset {offset:#x}"
+        );
+    }
+    assert!(
+        super::validate::validate_candidate(
+            &image,
+            &original,
+            &plan,
+            &resolved,
+            &candidate[..candidate.len() - 1]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn writer_planner_binds_whole_candidate_and_rejects_stale_base() {
+    use std::sync::atomic::AtomicBool;
+    let (image, site) = loadable_fixture();
+    let mut object = object_fixture();
+    object[0x100..0x108].copy_from_slice(&[0xb8, 2, 0, 0, 0, 0xc3, 0xc3, 0xc3]);
+    let cancel = AtomicBool::new(false);
+    let unit =
+        RelocatableUnit::parse(&object, "example", &RebuildLimits::default(), &cancel).unwrap();
+    let options = RebuildOptions {
+        mode: PlacementMode::Relocated,
+        limits: RebuildLimits::default(),
+    };
+    let plan = plan_replacement(&image, &site, &unit, options, &cancel).unwrap();
+    assert_eq!(plan.summary().mode, PlacementMode::Relocated);
+    assert!(plan.candidate().bytes().len() > image.bytes().len());
+    assert_eq!(
+        plan.apply_to(&image).unwrap().bytes(),
+        plan.candidate().bytes()
+    );
+    let changed = image.patched(0x300, &[1]).unwrap();
+    assert_eq!(
+        plan.apply_to(&changed).unwrap_err().code,
+        RebuildErrorCode::StaleImage
+    );
+    let mut bad_site = site.clone();
+    bad_site.name = "other".into();
+    assert!(plan_replacement(&image, &bad_site, &unit, options, &cancel).is_err());
+    assert_eq!(
+        plan_replacement(&image, &site, &unit, options, &AtomicBool::new(true))
+            .err()
+            .unwrap()
+            .code,
+        RebuildErrorCode::Cancelled
+    );
+}
+
+#[test]
+fn writer_maps_phdr_table_orders_loads_and_has_no_wx() {
+    let (image, site, plan, resolved) = writer_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let candidate = super::elf::write_candidate(&image, &original, &plan, &resolved).unwrap();
+    let get32 = |o| u32::from_le_bytes(candidate[o..o + 4].try_into().unwrap());
+    let get64 = |o| u64::from_le_bytes(candidate[o..o + 8].try_into().unwrap());
+    let p = plan.phdr_file.start;
+    assert_eq!(get32(p), 6);
+    assert_eq!(get64(p + 8), p as u64);
+    assert_eq!(get64(p + 16), plan.phdr_address);
+    let r = p + (plan.phdr_count - 2) * 56;
+    let x = r + 56;
+    assert_eq!((get32(r), get32(r + 4)), (1, 4));
+    assert_eq!((get32(x), get32(x + 4)), (1, 5));
+    assert!(get64(r + 16) < get64(x + 16));
+    assert!(
+        super::validate::validate_candidate(&image, &original, &plan, &resolved, &candidate)
+            .is_ok()
+    );
+    let mut corrupt = candidate.clone();
+    put32(&mut corrupt, x + 4, 7);
+    assert!(
+        super::validate::validate_candidate(&image, &original, &plan, &resolved, &corrupt).is_err()
+    );
+}
+#[test]
+fn writer_preserves_unrelated_relro_program_header() {
+    use std::sync::atomic::AtomicBool;
+    let (image, _) = loadable_fixture();
+    let mut bytes = image.bytes().to_vec();
+    put16(&mut bytes, 56, 2);
+    let p = 120;
+    put32(&mut bytes, p, 0x6474e552);
+    put32(&mut bytes, p + 4, 4);
+    put64(&mut bytes, p + 8, 0x200);
+    put64(&mut bytes, p + 16, 0x402000);
+    put64(&mut bytes, p + 24, 0x402000);
+    put64(&mut bytes, p + 32, 16);
+    put64(&mut bytes, p + 40, 16);
+    put64(&mut bytes, p + 48, 1);
+    let image = BinaryImage::parse(bytes).unwrap();
+    let site = ReplacementSite::discover(&image, 0x401000).unwrap();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let mut obj = object_fixture();
+    obj[0x100..0x108].copy_from_slice(&[0xb8, 2, 0, 0, 0, 0xc3, 0xc3, 0xc3]);
+    let unit = RelocatableUnit::parse(
+        &obj,
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let plan = super::layout::plan_layout(&original, &unit, &RebuildLimits::default()).unwrap();
+    let resolved =
+        super::relocate::resolve_unit(&unit, &original, &plan, &AtomicBool::new(false)).unwrap();
+    let candidate = super::elf::write_candidate(&image, &original, &plan, &resolved).unwrap();
+    assert_eq!(
+        &candidate[plan.phdr_file.start + 2 * 56..plan.phdr_file.start + 3 * 56],
+        &image.bytes()[120..176]
+    );
+    assert!(
+        super::validate::validate_candidate(&image, &original, &plan, &resolved, &candidate)
+            .is_ok()
+    );
+}
+#[test]
+fn writer_rejects_bad_symtab_links_and_invalid_local_order() {
+    let (image, site, plan, resolved) = writer_fixture();
+    let mut bad = image.clone();
+    let mut bytes = image.bytes().to_vec();
+    put32(&mut bytes, 0x480 + 40, 99);
+    bad.bytes = bytes.into();
+    assert!(super::elf::inspect_image(&bad, &site, &RebuildLimits::default()).is_err());
+    let mut bytes = image.bytes().to_vec();
+    bytes[0x21c] = 0x02;
+    let mut bad = image.clone();
+    bad.bytes = bytes.into();
+    let original = super::elf::inspect_image(&bad, &site, &RebuildLimits::default()).unwrap();
+    assert!(super::elf::write_candidate(&bad, &original, &plan, &resolved).is_err());
+}
+#[test]
+fn admission_rejects_entry_overlap_with_other_section() {
+    let (image, site) = loadable_fixture();
+    let mut bytes = image.bytes().to_vec();
+    put64(&mut bytes, 0x440 + 24, 0x100);
+    let mut bad = image.clone();
+    bad.bytes = bytes.into();
+    assert!(super::elf::inspect_image(&bad, &site, &RebuildLimits::default()).is_err());
+}

@@ -41,6 +41,7 @@ pub(super) struct UnitRelocation {
 #[allow(dead_code)]
 pub struct RelocatableUnit {
     pub(super) raw: Vec<u8>,
+    pub(super) function_name: String,
     pub(super) sections: Vec<UnitSection>,
     pub(super) symbols: Vec<UnitSymbol>,
     pub(super) relocations: Vec<UnitRelocation>,
@@ -397,6 +398,7 @@ impl RelocatableUnit {
         }
         Ok(Self {
             raw: bytes.to_vec(),
+            function_name: function_name.to_owned(),
             sections: owned_sections,
             symbols,
             relocations,
