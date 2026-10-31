@@ -15,6 +15,7 @@ mod calls;
 pub use calls::{CallGraph, CallSite};
 mod dwarf;
 mod memory;
+pub mod rebuild;
 pub mod recompile;
 pub use analysis::{
     Analysis, AnalysisLimits, AnalyzedFunction, BasicBlock, CrossReference, EdgeKind,
