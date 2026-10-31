@@ -82,9 +82,11 @@ changes; Restart shell starts in the newly selected folder. Stop sends hangup
 to the shell and foreground group; detached daemons are outside cleanup.
 Language diagnostics, Git integration, debugging and
 syntax highlighting remain unimplemented.
-Binary patches do not repair relocations, signatures, or checksums. Recovered
+Ordinary byte and instruction patches do not repair relocations, signatures, or
+checksums. Recovered
 pseudocode uses inferred names and types; it is not the original source.
 
 Read [the native round-trip guide](docs/native-roundtrip.md). Current replacement
-is limited to named, fixed-size Linux x86-64 ELF leaf functions without relocation
-requirements. Broader rewriting, hardware and language toolchains remain work.
+supports fixed-span edits and an opt-in bounded relocated mode for qualified
+Linux x86-64 executables and PIEs. Broader rewriting, hardware and language
+toolchains remain work.
