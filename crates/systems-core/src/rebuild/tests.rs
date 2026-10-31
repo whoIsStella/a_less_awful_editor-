@@ -698,3 +698,433 @@ fn unit_rejects_empty_and_duplicate_function_definitions() {
     put32(&mut alias, 0x230, 9);
     assert!(RelocatableUnit::parse(&alias, "example", &RebuildLimits::default(), &c).is_err());
 }
+
+#[test]
+fn relocation_pc32_checks_boundaries_and_explicit_addends() {
+    use super::relocate::evaluate_pc32;
+    assert_eq!(
+        evaluate_pc32(0x2000, -4, 0x1001).unwrap(),
+        [0xfb, 0x0f, 0, 0]
+    );
+    assert_eq!(
+        evaluate_pc32(i32::MAX as u64, 0, 0).unwrap(),
+        i32::MAX.to_le_bytes()
+    );
+    assert_eq!(
+        evaluate_pc32(0, 0, 0x8000_0000).unwrap(),
+        i32::MIN.to_le_bytes()
+    );
+    assert_eq!(
+        evaluate_pc32(0x8000_0000, 0, 0).unwrap_err().code,
+        RebuildErrorCode::RelocationOverflow
+    );
+    assert_eq!(
+        evaluate_pc32(0, 0, 0x8000_0001).unwrap_err().code,
+        RebuildErrorCode::RelocationOverflow
+    );
+    assert_eq!(evaluate_pc32(100, 9, 105).unwrap(), 4i32.to_le_bytes());
+    assert_eq!(evaluate_pc32(100, -9, 105).unwrap(), (-14i32).to_le_bytes());
+    assert_eq!(
+        evaluate_pc32(u64::MAX, -4, u64::MAX - 8).unwrap(),
+        4i32.to_le_bytes()
+    );
+    assert_eq!(
+        evaluate_pc32(u64::MAX, i64::MAX, 0).unwrap_err().code,
+        RebuildErrorCode::RelocationOverflow
+    );
+}
+
+#[test]
+fn binding_requires_unique_nonpreemptible_file_backed_definitions() {
+    use super::relocate::{Definition, DefinitionKind, bind_external};
+    let good = Definition {
+        name: "helper".into(),
+        address: 0x401100,
+        size: 12,
+        kind: DefinitionKind::Function,
+        binding: 0,
+        visibility: 0,
+        file_backed: true,
+        readable: true,
+        executable: true,
+        writable: false,
+        dynamic_relocated: false,
+    };
+    assert_eq!(
+        bind_external(
+            std::slice::from_ref(&good),
+            "helper",
+            DefinitionKind::Function,
+            false
+        )
+        .unwrap(),
+        0x401100
+    );
+    let mut bad = good.clone();
+    bad.binding = 2;
+    assert!(bind_external(&[bad], "helper", DefinitionKind::Function, false).is_err());
+    let mut bad = good.clone();
+    bad.binding = 1;
+    assert!(bind_external(&[bad], "helper", DefinitionKind::Function, false).is_err());
+    let mut hidden = good.clone();
+    hidden.binding = 1;
+    hidden.visibility = 2;
+    assert!(bind_external(&[hidden], "helper", DefinitionKind::Function, false).is_ok());
+    let mut bad = good.clone();
+    bad.file_backed = false;
+    assert!(bind_external(&[bad], "helper", DefinitionKind::Function, false).is_err());
+    assert_eq!(
+        bind_external(
+            &[good.clone(), good.clone()],
+            "helper",
+            DefinitionKind::Function,
+            false
+        )
+        .unwrap_err()
+        .code,
+        RebuildErrorCode::AmbiguousSymbol
+    );
+    assert_eq!(
+        bind_external(&[good], "imported", DefinitionKind::Function, false)
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::UndefinedSymbol
+    );
+}
+#[test]
+fn binding_data_requires_known_file_backed_span_and_permissions() {
+    use super::relocate::{Definition, DefinitionKind, bind_external};
+    let data = Definition {
+        name: "counter".into(),
+        address: 0x404010,
+        size: 4,
+        kind: DefinitionKind::Data,
+        binding: 0,
+        visibility: 0,
+        file_backed: true,
+        readable: true,
+        executable: false,
+        writable: true,
+        dynamic_relocated: false,
+    };
+    assert!(
+        bind_external(
+            std::slice::from_ref(&data),
+            "counter",
+            DefinitionKind::Data,
+            true
+        )
+        .is_ok()
+    );
+    for bad in [
+        Definition {
+            size: 0,
+            ..data.clone()
+        },
+        Definition {
+            file_backed: false,
+            ..data.clone()
+        },
+        Definition {
+            writable: false,
+            ..data.clone()
+        },
+        Definition {
+            dynamic_relocated: true,
+            ..data.clone()
+        },
+    ] {
+        assert!(bind_external(&[bad], "counter", DefinitionKind::Data, true).is_err());
+    }
+}
+
+#[test]
+fn relocation_sites_require_real_call_or_rip_displacement_fields() {
+    use super::relocate::{RelocationSite, classify_site};
+    assert_eq!(
+        classify_site(&[0xe8, 0, 0, 0, 0, 0xc3], 1, 4).unwrap(),
+        RelocationSite::Call
+    );
+    assert_eq!(
+        classify_site(&[0x8b, 0x05, 0, 0, 0, 0, 0xc3], 2, 2).unwrap(),
+        RelocationSite::Data {
+            write: false,
+            width: 4
+        }
+    );
+    assert_eq!(
+        classify_site(&[0x89, 0x05, 0, 0, 0, 0, 0xc3], 2, 2).unwrap(),
+        RelocationSite::Data {
+            write: true,
+            width: 4
+        }
+    );
+    assert!(classify_site(&[0xe9, 0, 0, 0, 0], 1, 4).is_err());
+    assert!(classify_site(&[0xff, 0x15, 0, 0, 0, 0], 2, 2).is_err());
+    assert!(classify_site(&[0xe8, 0, 0, 0, 0, 0xc3], 0, 4).is_err());
+    assert!(classify_site(&[0x8b, 0x05, 0, 0, 0, 0, 0xc3], 2, 4).is_err());
+}
+
+#[test]
+fn admission_dynamic_relocations_validate_raw_ranges_and_symbol_indices() {
+    use super::dynamic::parse_table;
+    let mut bytes = vec![0u8; 24];
+    put64(&mut bytes, 0, 0x401005);
+    put64(&mut bytes, 8, (2u64 << 32) | 7);
+    let ranges = parse_table(&bytes, true, 3, &[0, 4, 64]).unwrap();
+    assert_eq!(ranges, vec![0x401005..0x401015]);
+    assert!(parse_table(&bytes[..23], true, 3, &[0, 4, 64]).is_err());
+    put64(&mut bytes, 8, (3u64 << 32) | 7);
+    assert!(parse_table(&bytes, true, 3, &[0, 4, 64]).is_err());
+    put64(&mut bytes, 8, (2u64 << 32) | 5);
+    assert_eq!(
+        parse_table(&bytes, true, 3, &[0, 4, 64]).unwrap(),
+        vec![0x401005..0x401045]
+    );
+    put64(&mut bytes, 0, u64::MAX - 2);
+    assert!(parse_table(&bytes, true, 3, &[0, 4, 64]).is_err());
+}
+
+#[test]
+fn admission_dynamic_tags_must_match_validated_mapped_sections() {
+    use super::{dynamic::inspect_dynamic, elf::ProgramHeader};
+    let mut b = vec![0u8; 0x600];
+    let h = vec![
+        ProgramHeader {
+            kind: 1,
+            flags: 4,
+            offset: 0,
+            address: 0x400000,
+            file_size: 0x600,
+            memory_size: 0x600,
+            alignment: 0x1000,
+        },
+        ProgramHeader {
+            kind: 2,
+            flags: 4,
+            offset: 0x100,
+            address: 0x400100,
+            file_size: 128,
+            memory_size: 128,
+            alignment: 8,
+        },
+    ];
+    for (i, (tag, value)) in [
+        (6, 0x400200),
+        (11, 24),
+        (5, 0x400280),
+        (10, 16),
+        (7, 0x400300),
+        (8, 24),
+        (9, 24),
+        (0, 0),
+    ]
+    .iter()
+    .enumerate()
+    {
+        put64(&mut b, 0x100 + i * 16, *tag);
+        put64(&mut b, 0x108 + i * 16, *value);
+    }
+    let s = 0x440;
+    put32(&mut b, s + 4, 11);
+    put64(&mut b, s + 16, 0x400200);
+    put64(&mut b, s + 24, 0x200);
+    put64(&mut b, s + 32, 48);
+    put32(&mut b, s + 40, 2);
+    put64(&mut b, s + 56, 24);
+    let s = 0x480;
+    put32(&mut b, s + 4, 3);
+    put64(&mut b, s + 16, 0x400280);
+    put64(&mut b, s + 24, 0x280);
+    put64(&mut b, s + 32, 16);
+    let s = 0x4c0;
+    put32(&mut b, s + 4, 4);
+    put64(&mut b, s + 16, 0x400300);
+    put64(&mut b, s + 24, 0x300);
+    put64(&mut b, s + 32, 24);
+    put32(&mut b, s + 40, 1);
+    put64(&mut b, s + 56, 24);
+    put64(&mut b, 0x300, 0x400370);
+    put64(&mut b, 0x308, (1u64 << 32) | 7);
+    assert_eq!(
+        inspect_dynamic(&b, &h, 0x400, 4, 4096).unwrap(),
+        vec![0x400370..0x400380]
+    );
+    let mut bad = b.clone();
+    put64(&mut bad, 0x148, 0x400301);
+    assert!(inspect_dynamic(&bad, &h, 0x400, 4, 4096).is_err());
+    let mut bad = b.clone();
+    put64(&mut bad, 0x4c0 + 32, 23);
+    assert!(inspect_dynamic(&bad, &h, 0x400, 4, 4096).is_err());
+    let mut bad = b.clone();
+    put64(&mut bad, 0x108, 0x400210);
+    assert!(inspect_dynamic(&bad, &h, 0x400, 4, 4096).is_err());
+}
+
+#[test]
+fn binding_definitions_come_from_the_validated_image_mapping() {
+    let (image, site) = loadable_fixture();
+    let layout = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let d = layout
+        .definitions
+        .iter()
+        .find(|d| d.name == "example")
+        .unwrap();
+    assert_eq!((d.address, d.size), (0x401000, 8));
+    assert!(d.file_backed && d.executable && d.readable && !d.dynamic_relocated);
+}
+
+#[test]
+fn relocation_resolves_internal_rodata_and_rejects_missing_imports() {
+    use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+    let (image, site) = loadable_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let mut b = readonly_object();
+    // mov eax,[rip+disp32]; ret, with relocation to section-symbol 2 in rodata.
+    b[0x100..0x108].copy_from_slice(&[0x8b, 0x05, 0, 0, 0, 0, 0xc3, 0xc3]);
+    put64(&mut b, 0x300, 2);
+    put64(&mut b, 0x308, (2u64 << 32) | 2);
+    b[0x310..0x318].copy_from_slice(&(-4i64).to_le_bytes());
+    b[0x234] = 3;
+    put16(&mut b, 0x236, 6);
+    let unit = RelocatableUnit::parse(
+        &b,
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let placement = super::layout::AppendLayout {
+        section_addresses: BTreeMap::from([(1, 0x500000), (6, 0x4ff000)]),
+        body_address: 0x500000,
+    };
+    let resolved =
+        super::relocate::resolve_unit(&unit, &original, &placement, &AtomicBool::new(false))
+            .unwrap();
+    assert_eq!(&resolved.sections[&1][2..6], &(-4102i32).to_le_bytes());
+    assert_eq!(resolved.relocations[0].target_address, 0x4ff000);
+    let mut missing = b.clone();
+    put16(&mut missing, 0x236, 0);
+    missing[0x234] = 0x10;
+    let unit = RelocatableUnit::parse(
+        &missing,
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        super::relocate::resolve_unit(&unit, &original, &placement, &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::UndefinedSymbol
+    );
+}
+
+#[test]
+fn relocation_resolves_local_calls_self_recursion_and_data_permissions() {
+    use super::relocate::{Definition, DefinitionKind, resolve_unit};
+    use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+    let (image, site) = loadable_fixture();
+    let mut original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let placement = super::layout::AppendLayout {
+        section_addresses: BTreeMap::from([(1, 0x500000)]),
+        body_address: 0x500000,
+    };
+    let c = AtomicBool::new(false);
+    let mut b = relocation_object();
+    b[0x100..0x108].copy_from_slice(&[0xe8, 0, 0, 0, 0, 0xc3, 0xc3, 0xc3]);
+    put64(&mut b, 0x308, (2u64 << 32) | 4);
+    b[0x310..0x318].copy_from_slice(&(-4i64).to_le_bytes());
+    original.definitions.push(Definition {
+        name: "ext".into(),
+        address: 0x4ff000,
+        size: 8,
+        kind: DefinitionKind::Function,
+        binding: 0,
+        visibility: 0,
+        file_backed: true,
+        readable: true,
+        executable: true,
+        writable: false,
+        dynamic_relocated: false,
+    });
+    let unit = RelocatableUnit::parse(&b, "example", &RebuildLimits::default(), &c).unwrap();
+    let resolved = resolve_unit(&unit, &original, &placement, &c).unwrap();
+    assert_eq!(&resolved.sections[&1][1..5], &(-4101i32).to_le_bytes());
+    let mut self_call = b.clone();
+    put64(&mut self_call, 0x308, (1u64 << 32) | 4);
+    let unit =
+        RelocatableUnit::parse(&self_call, "example", &RebuildLimits::default(), &c).unwrap();
+    assert_eq!(
+        &resolve_unit(&unit, &original, &placement, &c)
+            .unwrap()
+            .sections[&1][1..5],
+        &(-5i32).to_le_bytes()
+    );
+    let mut interior = b.clone();
+    interior[0x310..0x318].copy_from_slice(&(-3i64).to_le_bytes());
+    let unit = RelocatableUnit::parse(&interior, "example", &RebuildLimits::default(), &c).unwrap();
+    assert!(resolve_unit(&unit, &original, &placement, &c).is_err());
+    let mut data = b;
+    data[0x100..0x108].copy_from_slice(&[0x89, 0x05, 0, 0, 0, 0, 0xc3, 0xc3]);
+    put64(&mut data, 0x300, 2);
+    put64(&mut data, 0x308, (2u64 << 32) | 2);
+    original.definitions.pop();
+    original.definitions.push(Definition {
+        name: "ext".into(),
+        address: 0x4ff000,
+        size: 4,
+        kind: DefinitionKind::Data,
+        binding: 0,
+        visibility: 0,
+        file_backed: true,
+        readable: true,
+        executable: false,
+        writable: true,
+        dynamic_relocated: false,
+    });
+    let unit = RelocatableUnit::parse(&data, "example", &RebuildLimits::default(), &c).unwrap();
+    assert!(resolve_unit(&unit, &original, &placement, &c).is_ok());
+    original.definitions.last_mut().unwrap().writable = false;
+    assert!(resolve_unit(&unit, &original, &placement, &c).is_err());
+    original.definitions.last_mut().unwrap().writable = true;
+    original.definitions.last_mut().unwrap().size = 3;
+    assert!(resolve_unit(&unit, &original, &placement, &c).is_err());
+    assert_eq!(
+        resolve_unit(&unit, &original, &placement, &AtomicBool::new(true))
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::Cancelled
+    );
+}
+
+#[test]
+fn relocation_rejects_unrelocated_rip_memory_and_outgoing_jumps() {
+    use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+    let (image, site) = loadable_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let placement = super::layout::AppendLayout {
+        section_addresses: BTreeMap::from([(1, 0x500000)]),
+        body_address: 0x500000,
+    };
+    for code in [
+        [0x8b, 0x05, 0, 0, 0, 0, 0xc3, 0xc3],
+        [0xe9, 0x20, 0, 0, 0, 0xc3, 0xc3, 0xc3],
+        [0xff, 0xd0, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3],
+    ] {
+        let mut b = object_fixture();
+        b[0x100..0x108].copy_from_slice(&code);
+        let unit = RelocatableUnit::parse(
+            &b,
+            "example",
+            &RebuildLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(
+            super::relocate::resolve_unit(&unit, &original, &placement, &AtomicBool::new(false))
+                .is_err()
+        );
+    }
+}

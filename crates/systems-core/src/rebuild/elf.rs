@@ -7,6 +7,9 @@ use object::{Object, ObjectSection, ObjectSymbol};
 #[allow(dead_code)]
 pub(super) struct ElfLayout {
     pub(super) program_headers: Vec<ProgramHeader>,
+    pub(super) dynamic_relocations: Vec<std::ops::Range<u64>>,
+    pub(super) definitions: Vec<super::relocate::Definition>,
+    pub(super) file_len: usize,
 }
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -266,6 +269,17 @@ pub(super) fn inspect_image(
             "Function is not in a matching executable load segment",
         ));
     }
+    let dynamic_relocations =
+        super::dynamic::inspect_dynamic(b, &headers, shoff, shnum, limits.max_symbols)?;
+    if dynamic_relocations
+        .iter()
+        .any(|range| range.start < end && range.end > site.address)
+    {
+        return Err(error(
+            RebuildErrorCode::UnsupportedMetadata,
+            "Dynamic relocation overlaps selected function",
+        ));
+    }
     let file = object::File::parse(b).map_err(|e| RebuildError {
         code: RebuildErrorCode::InvalidLayout,
         detail: e.to_string(),
@@ -371,6 +385,84 @@ pub(super) fn inspect_image(
             ));
         }
     }
+    let mut definitions = Vec::new();
+    for symbol in file.symbols().chain(file.dynamic_symbols()) {
+        if symbol.is_undefined() {
+            continue;
+        }
+        let object::SymbolFlags::Elf { st_info, st_other } = symbol.flags() else {
+            return Err(error(
+                RebuildErrorCode::UnsupportedMetadata,
+                "Non-ELF symbol flags",
+            ));
+        };
+        let kind = match st_info & 15 {
+            1 => super::relocate::DefinitionKind::Data,
+            2 => super::relocate::DefinitionKind::Function,
+            _ => continue,
+        };
+        let Some(index) = symbol.section_index() else {
+            continue;
+        };
+        let section = file.section_by_index(index).map_err(|e| RebuildError {
+            code: RebuildErrorCode::UnsupportedMetadata,
+            detail: e.to_string(),
+        })?;
+        let object::SectionFlags::Elf { sh_flags } = section.flags() else {
+            return Err(error(
+                RebuildErrorCode::UnsupportedMetadata,
+                "Non-ELF section flags",
+            ));
+        };
+        let start = symbol.address();
+        let span = if kind == super::relocate::DefinitionKind::Function {
+            symbol.size().max(1)
+        } else {
+            symbol.size()
+        };
+        let end = start.checked_add(span);
+        let relative = start.checked_sub(section.address());
+        let file_offset = section.file_range().and_then(|(off, size)| {
+            relative.and_then(|r| {
+                r.checked_add(span)
+                    .filter(|&end| end <= size)
+                    .and_then(|_| off.checked_add(r))
+            })
+        });
+        let mapping = end.and_then(|end| {
+            headers.iter().find(|h| {
+                h.kind == 1
+                    && start >= h.address
+                    && h.address.checked_add(h.file_size).is_some_and(|v| end <= v)
+                    && h.offset.checked_add(start - h.address) == file_offset
+            })
+        });
+        let pos = dynamic_relocations.partition_point(|r| r.end <= start);
+        let dynamic_relocated =
+            end.is_none_or(|end| dynamic_relocations.get(pos).is_some_and(|r| r.start < end));
+        definitions.push(super::relocate::Definition {
+            name: symbol
+                .name()
+                .map_err(|e| RebuildError {
+                    code: RebuildErrorCode::UnsupportedMetadata,
+                    detail: e.to_string(),
+                })?
+                .to_owned(),
+            address: start,
+            size: symbol.size(),
+            kind,
+            binding: st_info >> 4,
+            visibility: st_other & 3,
+            file_backed: span > 0
+                && file_offset.is_some()
+                && mapping.is_some()
+                && sh_flags & 2 != 0,
+            readable: mapping.is_some_and(|h| h.flags & 4 != 0),
+            executable: sh_flags & 4 != 0 && mapping.is_some_and(|h| h.flags & 1 != 0),
+            writable: sh_flags & 1 != 0 && mapping.is_some_and(|h| h.flags & 2 != 0),
+            dynamic_relocated,
+        });
+    }
     if headers.iter().any(|h| h.kind == 0x6474e550) && !eh_frame_seen {
         return Err(error(
             RebuildErrorCode::UnsupportedMetadata,
@@ -379,6 +471,9 @@ pub(super) fn inspect_image(
     }
     Ok(ElfLayout {
         program_headers: headers,
+        dynamic_relocations,
+        definitions,
+        file_len: b.len(),
     })
 }
 

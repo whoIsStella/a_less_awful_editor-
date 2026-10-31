@@ -161,3 +161,9 @@ mod elf;
 
 mod unit;
 pub use unit::RelocatableUnit;
+
+mod relocate;
+
+mod dynamic;
+
+mod layout;
