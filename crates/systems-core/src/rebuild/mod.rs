@@ -158,3 +158,6 @@ impl ReplacementPlan {
 mod tests;
 
 mod elf;
+
+mod unit;
+pub use unit::RelocatableUnit;

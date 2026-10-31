@@ -455,3 +455,246 @@ fn admission_rejects_short_entry_and_different_extent_alias() {
     let site = ReplacementSite::discover(&image, 0x401000).unwrap();
     assert!(super::elf::inspect_image(&candidate, &site, &RebuildLimits::default()).is_err());
 }
+
+fn object_fixture() -> Vec<u8> {
+    let (image, _) = fixture();
+    let mut bytes = image.bytes().to_vec();
+    put16(&mut bytes, 16, 1);
+    put64(&mut bytes, 24, 0);
+    put64(&mut bytes, 0x3c0 + 16, 0);
+    put64(&mut bytes, 0x220, 0);
+    bytes
+}
+#[test]
+fn unit_accepts_complete_function_and_preserves_raw_object() {
+    use std::sync::atomic::AtomicBool;
+    let bytes = object_fixture();
+    let unit = RelocatableUnit::parse(
+        &bytes,
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(unit.raw, bytes);
+    assert_eq!(unit.sections.len(), 1);
+    assert_eq!(unit.sections[0].bytes, &bytes[0x100..0x108]);
+    assert_eq!(
+        unit.symbols
+            .iter()
+            .find(|s| s.name == "example")
+            .unwrap()
+            .size,
+        8
+    );
+}
+#[test]
+fn unit_rejects_wrong_name_format_and_limits() {
+    use std::sync::atomic::AtomicBool;
+    let bytes = object_fixture();
+    let c = AtomicBool::new(false);
+    assert!(RelocatableUnit::parse(&bytes, "wrong", &RebuildLimits::default(), &c).is_err());
+    let mut wrong = bytes.clone();
+    put16(&mut wrong, 16, 2);
+    assert!(RelocatableUnit::parse(&wrong, "example", &RebuildLimits::default(), &c).is_err());
+    let limits = RebuildLimits {
+        max_object_bytes: bytes.len() - 1,
+        ..RebuildLimits::default()
+    };
+    assert_eq!(
+        RelocatableUnit::parse(&bytes, "example", &limits, &c)
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::TooLarge
+    );
+    assert_eq!(
+        RelocatableUnit::parse(
+            &bytes,
+            "example",
+            &RebuildLimits::default(),
+            &AtomicBool::new(true)
+        )
+        .unwrap_err()
+        .code,
+        RebuildErrorCode::Cancelled
+    );
+}
+
+fn relocation_object() -> Vec<u8> {
+    let mut bytes = object_fixture();
+    put16(&mut bytes, 60, 6);
+    bytes[0x1c9..0x1cd].copy_from_slice(b"ext\0");
+    put64(&mut bytes, 0x440 + 32, 13);
+    put64(&mut bytes, 0x480 + 32, 72);
+    put32(&mut bytes, 0x230, 9);
+    bytes[0x234] = 0x10;
+    put64(&mut bytes, 0x300, 1);
+    put64(&mut bytes, 0x308, (2u64 << 32) | 2);
+    bytes[0x310..0x318].copy_from_slice(&(-7i64).to_le_bytes());
+    put32(&mut bytes, 0x4c0 + 4, 4);
+    put64(&mut bytes, 0x4c0 + 24, 0x300);
+    put64(&mut bytes, 0x4c0 + 32, 24);
+    put32(&mut bytes, 0x4c0 + 40, 4);
+    put32(&mut bytes, 0x4c0 + 44, 1);
+    put64(&mut bytes, 0x4c0 + 48, 8);
+    put64(&mut bytes, 0x4c0 + 56, 24);
+    bytes
+}
+fn readonly_object() -> Vec<u8> {
+    let mut bytes = relocation_object();
+    bytes.resize(0x540, 0);
+    put16(&mut bytes, 60, 7);
+    bytes[0x1a1..0x1a9].copy_from_slice(b".rodata\0");
+    put64(&mut bytes, 0x400 + 32, 41);
+    bytes[0x340..0x344].copy_from_slice(&[3, 7, 11, 19]);
+    put32(&mut bytes, 0x500, 33);
+    put32(&mut bytes, 0x500 + 4, 1);
+    put64(&mut bytes, 0x500 + 8, 2);
+    put64(&mut bytes, 0x500 + 24, 0x340);
+    put64(&mut bytes, 0x500 + 32, 4);
+    put64(&mut bytes, 0x500 + 48, 4);
+    bytes
+}
+#[test]
+fn unit_preserves_explicit_relocation_kind_symbol_and_addend() {
+    use std::sync::atomic::AtomicBool;
+    let bytes = relocation_object();
+    let unit = RelocatableUnit::parse(
+        &bytes,
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(unit.relocations.len(), 1);
+    let r = &unit.relocations[0];
+    assert_eq!(
+        (r.section, r.offset, r.raw_kind, r.symbol, r.addend),
+        (1, 1, 2, 2, -7)
+    );
+}
+#[test]
+fn unit_rejects_bad_relocations_and_overlaps() {
+    use std::sync::atomic::AtomicBool;
+    let c = AtomicBool::new(false);
+    let limits = RebuildLimits::default();
+    let base = relocation_object();
+    for (offset, value) in [
+        (0x300, 6u64),
+        (0x308, (99u64 << 32) | 2),
+        (0x308, (2u64 << 32) | 99),
+    ] {
+        let mut b = base.clone();
+        put64(&mut b, offset, value);
+        assert!(RelocatableUnit::parse(&b, "example", &limits, &c).is_err());
+    }
+    let mut b = base.clone();
+    put32(&mut b, 0x4c0 + 4, 9);
+    assert!(RelocatableUnit::parse(&b, "example", &limits, &c).is_err());
+    let mut b = base.clone();
+    put64(&mut b, 0x4c0 + 32, 48);
+    put64(&mut b, 0x318, 3);
+    put64(&mut b, 0x320, (2u64 << 32) | 4);
+    assert_eq!(
+        RelocatableUnit::parse(&b, "example", &limits, &c)
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::Overlap
+    );
+    let mut b = base.clone();
+    put64(&mut b, 0x308, 99u64 << 32);
+    assert!(RelocatableUnit::parse(&b, "example", &limits, &c).is_err());
+}
+#[test]
+fn unit_readonly_and_exact_limits() {
+    use std::sync::atomic::AtomicBool;
+    let b = readonly_object();
+    let c = AtomicBool::new(false);
+    let limits = RebuildLimits {
+        max_object_bytes: b.len(),
+        max_object_sections: 7,
+        max_symbols: 3,
+        max_relocations: 1,
+        max_text_bytes: 8,
+        max_rodata_bytes: 4,
+        ..RebuildLimits::default()
+    };
+    let unit = RelocatableUnit::parse(&b, "example", &limits, &c).unwrap();
+    assert_eq!(unit.sections.len(), 2);
+    for smaller in [
+        RebuildLimits {
+            max_object_bytes: b.len() - 1,
+            ..limits
+        },
+        RebuildLimits {
+            max_object_sections: 6,
+            ..limits
+        },
+        RebuildLimits {
+            max_symbols: 2,
+            ..limits
+        },
+        RebuildLimits {
+            max_relocations: 0,
+            ..limits
+        },
+        RebuildLimits {
+            max_text_bytes: 7,
+            ..limits
+        },
+        RebuildLimits {
+            max_rodata_bytes: 3,
+            ..limits
+        },
+    ] {
+        assert_eq!(
+            RelocatableUnit::parse(&b, "example", &smaller, &c)
+                .unwrap_err()
+                .code,
+            RebuildErrorCode::TooLarge
+        );
+    }
+}
+#[test]
+fn unit_rejects_writable_tls_nobits_and_extra_code() {
+    use std::sync::atomic::AtomicBool;
+    let b = readonly_object();
+    let c = AtomicBool::new(false);
+    for (offset, value) in [(0x500 + 8, 3u64), (0x500 + 8, 0x402), (0x500 + 8, 6)] {
+        let mut b = b.clone();
+        put64(&mut b, offset, value);
+        assert!(RelocatableUnit::parse(&b, "example", &RebuildLimits::default(), &c).is_err());
+    }
+    let mut b = b.clone();
+    put32(&mut b, 0x500 + 4, 8);
+    assert!(RelocatableUnit::parse(&b, "example", &RebuildLimits::default(), &c).is_err());
+    let mut b = b.clone();
+    b[0x234] = 0x16;
+    assert!(RelocatableUnit::parse(&b, "example", &RebuildLimits::default(), &c).is_err());
+    let mut b = b.clone();
+    b[0x234] = 0x1a;
+    assert!(RelocatableUnit::parse(&b, "example", &RebuildLimits::default(), &c).is_err());
+    let mut b = b.clone();
+    put16(&mut b, 0x236, 0xfff2);
+    assert!(RelocatableUnit::parse(&b, "example", &RebuildLimits::default(), &c).is_err());
+}
+
+#[test]
+fn unit_rejects_empty_and_duplicate_function_definitions() {
+    use std::sync::atomic::AtomicBool;
+    let c = AtomicBool::new(false);
+    let base = object_fixture();
+    let mut empty = base.clone();
+    put64(&mut empty, 0x3c0 + 32, 0);
+    put64(&mut empty, 0x228, 0);
+    assert!(RelocatableUnit::parse(&empty, "example", &RebuildLimits::default(), &c).is_err());
+    let mut duplicate = base.clone();
+    put64(&mut duplicate, 0x480 + 32, 72);
+    duplicate[0x230..0x248].copy_from_slice(&base[0x218..0x230]);
+    assert!(RelocatableUnit::parse(&duplicate, "example", &RebuildLimits::default(), &c).is_err());
+    let mut alias = duplicate;
+    alias[0x1c9..0x1cf].copy_from_slice(b"alias\0");
+    put64(&mut alias, 0x440 + 32, 15);
+    put32(&mut alias, 0x230, 9);
+    assert!(RelocatableUnit::parse(&alias, "example", &RebuildLimits::default(), &c).is_err());
+}
