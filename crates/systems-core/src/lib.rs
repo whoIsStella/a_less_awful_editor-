@@ -11,6 +11,8 @@ use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter, OpKind};
 use object::{Object, ObjectSection, ObjectSymbol};
 
 mod analysis;
+mod calls;
+pub use calls::{CallGraph, CallSite};
 mod dwarf;
 mod memory;
 pub use analysis::{
