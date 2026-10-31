@@ -167,3 +167,6 @@ mod relocate;
 mod dynamic;
 
 mod layout;
+
+mod metadata;
+pub use metadata::RewriteLocation;

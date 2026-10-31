@@ -997,6 +997,7 @@ fn relocation_resolves_internal_rodata_and_rejects_missing_imports() {
     let placement = super::layout::AppendLayout {
         section_addresses: BTreeMap::from([(1, 0x500000), (6, 0x4ff000)]),
         body_address: 0x500000,
+        ..Default::default()
     };
     let resolved =
         super::relocate::resolve_unit(&unit, &original, &placement, &AtomicBool::new(false))
@@ -1030,6 +1031,7 @@ fn relocation_resolves_local_calls_self_recursion_and_data_permissions() {
     let placement = super::layout::AppendLayout {
         section_addresses: BTreeMap::from([(1, 0x500000)]),
         body_address: 0x500000,
+        ..Default::default()
     };
     let c = AtomicBool::new(false);
     let mut b = relocation_object();
@@ -1107,6 +1109,7 @@ fn relocation_rejects_unrelocated_rip_memory_and_outgoing_jumps() {
     let placement = super::layout::AppendLayout {
         section_addresses: BTreeMap::from([(1, 0x500000)]),
         body_address: 0x500000,
+        ..Default::default()
     };
     for code in [
         [0x8b, 0x05, 0, 0, 0, 0, 0xc3, 0xc3],
@@ -1127,4 +1130,120 @@ fn relocation_rejects_unrelocated_rip_memory_and_outgoing_jumps() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn metadata_rewrite_note_roundtrips_and_rejects_malformed_records() {
+    use super::metadata::{RewriteLocation, decode_note, encode_note};
+    let loc = RewriteLocation {
+        entry_address: 0x401000,
+        original_capacity: 8,
+        body_address: 0x403000,
+        body_size: 72,
+    };
+    let note = encode_note(&loc);
+    assert_eq!(note.len(), 52);
+    assert_eq!(decode_note(&note).unwrap(), loc);
+    for offset in [0, 4, 8, 12, 16] {
+        let mut bad = note.clone();
+        bad[offset] ^= 0x80;
+        assert!(decode_note(&bad).is_err());
+    }
+    assert!(decode_note(&note[..51]).is_err());
+    let mut trailing = note.clone();
+    trailing.extend_from_slice(&[0, 0, 0, 0]);
+    assert!(decode_note(&trailing).is_err());
+}
+
+#[test]
+fn layout_appends_phdr_rodata_text_and_bounded_metadata() {
+    use std::sync::atomic::AtomicBool;
+    let (image, site) = loadable_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let unit = RelocatableUnit::parse(
+        &readonly_object(),
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let plan = super::layout::plan_layout(&original, &unit, &RebuildLimits::default()).unwrap();
+    assert_eq!(plan.phdr_count, 4);
+    assert_eq!(plan.phdr_file.start, 0x1000);
+    assert_eq!(plan.phdr_address, 0x402000);
+    assert_eq!(plan.section_addresses[&6], 0x4020e0);
+    assert_eq!(plan.body_address, 0x403000);
+    assert_eq!(plan.section_files[&1], 0x2000..0x2008);
+    assert_eq!(plan.detour, [0xe9, 0xfb, 0x1f, 0, 0, 0x90, 0x90, 0x90]);
+    assert!(plan.note_file.start >= plan.section_files[&1].end);
+    assert!(plan.output_len <= RebuildLimits::default().max_image_bytes);
+    assert_eq!(
+        plan,
+        super::layout::plan_layout(&original, &unit, &RebuildLimits::default()).unwrap()
+    );
+    let exact = RebuildLimits {
+        max_image_bytes: plan.output_len,
+        ..RebuildLimits::default()
+    };
+    assert!(super::layout::plan_layout(&original, &unit, &exact).is_ok());
+    let over = RebuildLimits {
+        max_image_bytes: plan.output_len - 1,
+        ..exact
+    };
+    assert_eq!(
+        super::layout::plan_layout(&original, &unit, &over)
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::TooLarge
+    );
+}
+
+#[test]
+fn layout_handles_no_rodata_and_rejects_alignment_headers_and_reachability() {
+    use std::sync::atomic::AtomicBool;
+    let (image, site) = loadable_fixture();
+    let mut original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let mut unit = RelocatableUnit::parse(
+        &object_fixture(),
+        "example",
+        &RebuildLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let plan = super::layout::plan_layout(&original, &unit, &RebuildLimits::default()).unwrap();
+    assert_eq!(plan.read_file, 0x1000..0x10e0);
+    assert_eq!(plan.section_files.len(), 1);
+    unit.sections[0].alignment = 1 << 30;
+    assert_eq!(
+        super::layout::plan_layout(&original, &unit, &RebuildLimits::default())
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::TooLarge
+    );
+    unit.sections[0].alignment = 1;
+    original.program_headers[0].address = 0x9000_0000;
+    assert_eq!(
+        super::layout::plan_layout(&original, &unit, &RebuildLimits::default())
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::RelocationOverflow
+    );
+    original.program_headers[0].address = 0x401000;
+    let template = original.program_headers[0].clone();
+    original
+        .program_headers
+        .resize_with(256, || template.clone());
+    assert_eq!(
+        super::layout::plan_layout(&original, &unit, &RebuildLimits::default())
+            .unwrap()
+            .phdr_count,
+        259
+    );
+    original.program_headers.push(template);
+    assert_eq!(
+        super::layout::plan_layout(&original, &unit, &RebuildLimits::default())
+            .unwrap_err()
+            .code,
+        RebuildErrorCode::TooLarge
+    );
 }

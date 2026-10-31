@@ -10,8 +10,13 @@ pub(super) struct ElfLayout {
     pub(super) dynamic_relocations: Vec<std::ops::Range<u64>>,
     pub(super) definitions: Vec<super::relocate::Definition>,
     pub(super) file_len: usize,
+    pub(super) section_count: usize,
+    pub(super) shstrtab_size: usize,
+    pub(super) symtab_size: usize,
+    pub(super) strtab_size: usize,
+    pub(super) site: ReplacementSite,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub(super) struct ProgramHeader {
     pub(super) kind: u32,
@@ -176,6 +181,42 @@ pub(super) fn inspect_image(
             ));
         }
     }
+    let sym_index = *static_symtabs.first().ok_or_else(|| {
+        error(
+            RebuildErrorCode::UnsupportedMetadata,
+            "A static symbol table is required",
+        )
+    })?;
+    let sym_offset = shoff + sym_index * 64;
+    let str_index = usize::try_from(u32le(b, sym_offset + 40)?).map_err(|_| {
+        error(
+            RebuildErrorCode::InvalidLayout,
+            "String table index overflow",
+        )
+    })?;
+    if str_index >= shnum
+        || str_index == shstr
+        || u32le(b, shoff + str_index * 64 + 4)? != 3
+        || u32le(b, shoff + shstr * 64 + 4)? != 3
+        || u64le(b, sym_offset + 8)? & 2 != 0
+        || u64le(b, shoff + str_index * 64 + 8)? & 2 != 0
+        || u64le(b, shoff + shstr * 64 + 8)? & 2 != 0
+    {
+        return Err(error(
+            RebuildErrorCode::UnsupportedMetadata,
+            "Invalid symbol or section string table",
+        ));
+    }
+    let size_for = |index: usize| -> Result<usize, RebuildError> {
+        let o = shoff + index * 64;
+        let size = usize::try_from(u64le(b, o + 32)?)
+            .map_err(|_| error(RebuildErrorCode::TooLarge, "Metadata size overflows"))?;
+        table(b, u64le(b, o + 24)?, size, 1)?;
+        Ok(size)
+    };
+    let symtab_size = size_for(sym_index)?;
+    let strtab_size = size_for(str_index)?;
+    let shstrtab_size = size_for(shstr)?;
     let actual = ReplacementSite::discover(image, site.address).map_err(|d| RebuildError {
         code: RebuildErrorCode::InvalidLayout,
         detail: d,
@@ -474,6 +515,11 @@ pub(super) fn inspect_image(
         dynamic_relocations,
         definitions,
         file_len: b.len(),
+        section_count: shnum,
+        shstrtab_size,
+        symtab_size,
+        strtab_size,
+        site: site.clone(),
     })
 }
 
