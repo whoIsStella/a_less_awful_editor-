@@ -869,6 +869,16 @@ impl Render for AppShell {
                         cx.listener(|this, _, window, cx| this.save_active(false, window, cx)),
                     ))
                     .when(self.replacement_target.is_some(), |v| {
+                        let enabled=self.workbench.as_ref().is_some_and(|w|w.read(cx).relocated_mode());
+                        v.child(systems::button(if enabled {"Allow relocated: On"}else{"Allow relocated: Off"})
+                            .when(enabled,|button|button.bg(rgb(0x1b2028)).text_color(rgb(0xe0af68)))
+                            .on_click(cx.listener(|this,_,_,cx| {
+                                if let Some(workbench)=this.workbench.clone() {workbench.update(cx,|w,cx|w.toggle_relocated_mode(cx));}
+                                this.status="Relocation is opt-in: supported x86-64 Linux executables; no external imports, TLS or new mutable storage.".into();
+                                cx.notify();
+                            })))
+                    })
+                    .when(self.replacement_target.is_some(), |v| {
                         v.child(
                             systems::button(
                                 if self

@@ -22,10 +22,10 @@ pub(super) struct AnalysisState {
     pub status: String,
     generation: u64,
     cancellation: Option<Arc<AtomicBool>>,
-    focused_function: Option<usize>,
+    pub(super) focused_function: Option<usize>,
     symbols: bool,
     mode: FlowMode,
-    calls: Option<Arc<CallGraph>>,
+    pub(super) calls: Option<Arc<CallGraph>>,
     call_pages: [usize; 2],
     call_context: Option<usize>,
 }

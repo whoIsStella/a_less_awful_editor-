@@ -502,7 +502,11 @@ pub(super) fn inspect_image(
             })?;
             check_unwind(&data, section.address(), site.address..end)?;
         }
-        if section.name().ok() == Some(".note.ale.rewrite") {
+        if section
+            .name()
+            .ok()
+            .is_some_and(|name| name.starts_with(".note.ale.rewrite"))
+        {
             return Err(error(
                 RebuildErrorCode::UnsupportedMetadata,
                 "A previous relocated rewrite is present",

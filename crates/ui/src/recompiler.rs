@@ -24,11 +24,29 @@ fn validate(source: &str) -> Result<(), String> {
     }
     Ok(())
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompileProfile {
+    LegacyLeaf,
+    RelocatablePic,
+}
+pub(crate) struct CompiledObject {
+    pub bytes: Vec<u8>,
+    pub compiler_identity: String,
+}
+#[allow(dead_code)] // Retains the fixed-span compiler entry point for existing callers.
 pub(crate) fn compile(
     source: &str,
     site: &ReplacementSite,
     cancel: &AtomicBool,
 ) -> Result<Vec<u8>, String> {
+    let object = compile_object(source, CompileProfile::LegacyLeaf, cancel)?;
+    site.replacement(&object.bytes)
+}
+pub(crate) fn compile_object(
+    source: &str,
+    profile: CompileProfile,
+    cancel: &AtomicBool,
+) -> Result<CompiledObject, String> {
     if !cfg!(target_os = "linux") {
         return Err("Native C replacement currently requires Linux.".into());
     }
@@ -58,8 +76,17 @@ pub(crate) fn compile(
             "-ffreestanding",
             "-fno-builtin",
             "-fno-stack-protector",
-            "-fno-pic",
-            "-fno-pie",
+        ]);
+    match profile {
+        CompileProfile::LegacyLeaf => {
+            command.args(["-fno-pic", "-fno-pie"]);
+        }
+        CompileProfile::RelocatablePic => {
+            command.args(["-fpie", "-fno-optimize-sibling-calls"]);
+        }
+    }
+    command
+        .args([
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
             "-fno-jump-tables",
@@ -76,6 +103,28 @@ pub(crate) fn compile(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(fs::File::create(&diagnostics).map_err(|e| e.to_string())?);
+    restrict(&mut command);
+    let status = wait(&mut command, cancel)?;
+    let mut detail = String::new();
+    fs::File::open(&diagnostics)
+        .map_err(|e| e.to_string())?
+        .take(65536)
+        .read_to_string(&mut detail)
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("C compilation failed ({status}):\n{detail}"));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Compilation cancelled; no preview changed.".into());
+    }
+    let bytes = bounded_object(&output)?;
+    let compiler_identity = compiler_identity(dir.path(), cancel)?;
+    Ok(CompiledObject {
+        bytes,
+        compiler_identity,
+    })
+}
+fn restrict(command: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -101,16 +150,26 @@ pub(crate) fn compile(
             });
         }
     }
+}
+fn wait(command: &mut Command, cancel: &AtomicBool) -> Result<std::process::ExitStatus, String> {
+    wait_with_timeout(command, cancel, Duration::from_secs(10))
+}
+fn wait_with_timeout(
+    command: &mut Command,
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Compilation cancelled; no preview changed.".into());
+    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("Could not start /usr/bin/cc: {e}"))?;
     let start = Instant::now();
-    let status = loop {
+    loop {
         match child.try_wait() {
             Ok(Some(s)) => break Ok(s),
-            Ok(None)
-                if start.elapsed() < Duration::from_secs(10) && !cancel.load(Ordering::Relaxed) =>
-            {
+            Ok(None) if start.elapsed() < timeout && !cancel.load(Ordering::Relaxed) => {
                 std::thread::sleep(Duration::from_millis(10))
             }
             other => {
@@ -127,21 +186,41 @@ pub(crate) fn compile(
                 });
             }
         }
-    }?;
-    let mut detail = String::new();
-    fs::File::open(&diagnostics)
-        .map_err(|e| e.to_string())?
-        .take(65536)
-        .read_to_string(&mut detail)
-        .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err(format!("C compilation failed ({status}):\n{detail}"));
     }
+}
+fn compiler_identity(dir: &Path, cancel: &AtomicBool) -> Result<String, String> {
     if cancel.load(Ordering::Relaxed) {
-        return Err("Compilation cancelled; no preview changed.".into());
+        return Err("Compilation cancelled.".into());
     }
-    let bytes = bounded_object(&output)?;
-    site.replacement(&bytes)
+    let path = dir.join("compiler-version.txt");
+    let mut command = Command::new("/usr/bin/cc");
+    command
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .env("TMPDIR", dir)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(fs::File::create(&path).map_err(|e| e.to_string())?);
+    restrict(&mut command);
+    if !wait(&mut command, cancel)?.success() {
+        return Err("Could not identify /usr/bin/cc.".into());
+    }
+    let mut data = String::new();
+    fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(4096)
+        .read_to_string(&mut data)
+        .map_err(|e| e.to_string())?;
+    let identity = data
+        .lines()
+        .next()
+        .filter(|v| !v.is_empty())
+        .ok_or("Compiler identity is empty.")?;
+    Ok(identity.to_owned())
 }
 fn bounded_object(path: &Path) -> Result<Vec<u8>, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
@@ -385,5 +464,45 @@ ret
             );
         }
         assert_eq!(fs::read(binary).unwrap(), image.bytes());
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod profile_tests {
+    use super::*;
+    #[test]
+    fn timeout_cancellation_and_object_size_are_bounded() {
+        let c = AtomicBool::new(false);
+        let mut command = Command::new("/usr/bin/sleep");
+        command.arg("30");
+        restrict(&mut command);
+        let start = Instant::now();
+        assert!(wait_with_timeout(&mut command, &c, Duration::from_millis(40)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(
+            compile_object(
+                "int roundtrip(int x){return x;}",
+                CompileProfile::RelocatablePic,
+                &AtomicBool::new(true)
+            )
+            .is_err()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("too-large.o");
+        fs::write(&path, vec![0; 2 * 1024 * 1024 + 1]).unwrap();
+        assert!(bounded_object(&path).is_err());
+    }
+    #[test]
+    fn relocatable_profile_emits_bounded_object_and_identity() {
+        let c = AtomicBool::new(false);
+        let compiled=compile_object("extern int helper(int); extern int counter; static const int table[4]={3,7,11,19}; int roundtrip(int x){counter+=table[x&3];return helper(counter);}",CompileProfile::RelocatablePic,&c).unwrap();
+        assert!(!compiled.compiler_identity.is_empty());
+        ale_systems_core::rebuild::RelocatableUnit::parse(
+            &compiled.bytes,
+            "roundtrip",
+            &Default::default(),
+            &c,
+        )
+        .unwrap();
     }
 }

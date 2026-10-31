@@ -158,7 +158,14 @@ fn patch_preview_history_and_export_snapshot_keep_newer_edits_dirty(cx: &mut Tes
     update(&workbench, cx, |workbench, _| {
         assert_eq!(workbench.image.bytes(), original);
         assert!(!workbench.is_dirty());
-        assert_eq!(workbench.preview, Some((0, vec![0xb8, 42, 0, 0, 0], 0)));
+        assert_eq!(
+            workbench.preview,
+            Some(Preview::Bytes {
+                offset: 0,
+                bytes: vec![0xb8, 42, 0, 0, 0],
+                binary_revision: 0
+            })
+        );
     });
     update(&workbench, cx, |workbench, cx| workbench.apply_patch(cx));
     cx.run_until_parked();
@@ -223,7 +230,14 @@ fn invalid_preview_and_noop_patch_never_change_bytes(cx: &mut TestAppContext) {
     });
     command(&workbench, Command::Patch, "90", cx);
     update(&workbench, cx, |workbench, cx| {
-        workbench.preview.as_mut().unwrap().2 = workbench.revision + 1;
+        if let Some(Preview::Bytes {
+            binary_revision, ..
+        }) = workbench.preview.as_mut()
+        {
+            *binary_revision = workbench.revision + 1;
+        } else {
+            panic!("expected byte preview");
+        }
         workbench.apply_patch(cx);
         assert!(workbench.preview.is_none());
         assert!(workbench.message.contains("Stale"));
@@ -243,7 +257,14 @@ fn assembler_previews_only_equal_length_and_current_location(cx: &mut TestAppCon
     command(&workbench, Command::Assemble, "mov eax, 42", cx);
     cx.run_until_parked();
     update(&workbench, cx, |workbench, _| {
-        assert_eq!(workbench.preview, Some((0, vec![0xb8, 42, 0, 0, 0], 0)));
+        assert_eq!(
+            workbench.preview,
+            Some(Preview::Bytes {
+                offset: 0,
+                bytes: vec![0xb8, 42, 0, 0, 0],
+                binary_revision: 0
+            })
+        );
         assert_eq!(workbench.image.bytes(), fixture().bytes());
     });
     command(&workbench, Command::Assemble, "nop", cx);

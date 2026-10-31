@@ -168,6 +168,22 @@ impl Workbench {
         cx.notify();
     }
 
+    pub(super) fn go_rewrite_body(&mut self, cx: &mut Context<Self>) {
+        let Some(body) = self
+            .image
+            .rewrite_locations()
+            .first()
+            .map(|location| location.body_address)
+        else {
+            return;
+        };
+        if let Some(offset) = self.image.address_to_offset(body) {
+            self.analysis.focused_function = Some(offset);
+            self.go(offset, cx);
+            self.lens = Lens::Pseudocode;
+        }
+    }
+
     pub(super) fn pseudocode_view(&self, cx: &Context<Self>) -> Div {
         let mut root = div().flex().flex_col().min_w_full().child(
             div()
@@ -213,6 +229,26 @@ impl Workbench {
                         .child(self.decompiler.status.clone()),
                 ),
         );
+        if let Some(location) = self.image.rewrite_locations().first() {
+            let entry = location.entry_address;
+            let body = location.body_address;
+            root = root.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(11.0))
+                    .child(format!(
+                        "Entry stub {entry:#x} → replacement body {body:#x}"
+                    ))
+                    .child(
+                        button("Go to replacement body")
+                            .on_click(cx.listener(move |this, _, _, cx| this.go_rewrite_body(cx))),
+                    ),
+            );
+        }
         let Some(result) = &self.decompiler.result else {
             return root.child(
                 div()
