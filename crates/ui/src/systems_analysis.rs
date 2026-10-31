@@ -1,9 +1,19 @@
 //! Snapshot-bound analysis jobs and native control-flow presentation.
 use super::*;
-use ale_systems_core::{Analysis, AnalysisLimits, AnalyzedFunction, EdgeKind, EdgeResolution};
+use ale_systems_core::{
+    Analysis, AnalysisLimits, AnalyzedFunction, CallGraph, EdgeKind, EdgeResolution,
+};
 use gpui::{PathBuilder, canvas, point};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum FlowMode {
+    #[default]
+    Blocks,
+    References,
+    Calls,
+}
 
 #[derive(Default)]
 pub(super) struct AnalysisState {
@@ -14,7 +24,10 @@ pub(super) struct AnalysisState {
     cancellation: Option<Arc<AtomicBool>>,
     focused_function: Option<usize>,
     symbols: bool,
-    references: bool,
+    mode: FlowMode,
+    calls: Option<Arc<CallGraph>>,
+    call_pages: [usize; 2],
+    call_context: Option<usize>,
 }
 
 impl Drop for AnalysisState {
@@ -30,6 +43,9 @@ impl Workbench {
         self.invalidate_decompiler();
         self.cancel_analysis(cx);
         self.analysis.result = None;
+        self.analysis.calls = None;
+        self.analysis.call_pages = [0, 0];
+        self.analysis.call_context = None;
         self.analysis.running = true;
         self.analysis.status = "Discovering functions and control flow…".into();
         let generation = self.analysis.generation;
@@ -38,9 +54,11 @@ impl Workbench {
         let architecture = self.architecture.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.analysis.cancellation = Some(cancel.clone());
-        let work = cx
-            .background_executor()
-            .spawn(async move { image.analyze(&architecture, AnalysisLimits::default(), &cancel) });
+        let work = cx.background_executor().spawn(async move {
+            let analysis = image.analyze(&architecture, AnalysisLimits::default(), &cancel)?;
+            let calls = analysis.call_graph(&cancel)?;
+            Ok::<_, String>((analysis, calls))
+        });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
@@ -50,7 +68,7 @@ impl Workbench {
                 this.analysis.running = false;
                 this.analysis.cancellation = None;
                 match result {
-                    Ok(result) => {
+                    Ok((result, calls)) => {
                         this.analysis.status = format!(
                             "{} function candidates · {} references{}",
                             result.functions.len(),
@@ -61,6 +79,7 @@ impl Workbench {
                                 ""
                             }
                         );
+                        this.analysis.calls = Some(Arc::new(calls));
                         this.analysis.result = Some(Arc::new(result));
                     }
                     Err(error) => this.analysis.status = error,
@@ -235,22 +254,34 @@ impl Workbench {
                 .child(
                     button("Blocks")
                         .text_size(px(11.0))
-                        .when(!self.analysis.references, |tab| {
+                        .when(self.analysis.mode == FlowMode::Blocks, |tab| {
                             tab.text_color(rgb(0x7aa2f7))
                         })
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.analysis.references = false;
+                            this.analysis.mode = FlowMode::Blocks;
                             cx.notify();
                         })),
                 )
                 .child(
                     button("References")
                         .text_size(px(11.0))
-                        .when(self.analysis.references, |tab| {
+                        .when(self.analysis.mode == FlowMode::References, |tab| {
                             tab.text_color(rgb(0x7aa2f7))
                         })
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.analysis.references = true;
+                            this.analysis.mode = FlowMode::References;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("Calls")
+                        .text_size(px(11.0))
+                        .when(self.analysis.mode == FlowMode::Calls, |tab| {
+                            tab.text_color(rgb(0x7aa2f7))
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.analysis.mode = FlowMode::Calls;
+                            this.scroll.set_offset(point(px(0.0), px(0.0)));
                             cx.notify();
                         })),
                 )
@@ -279,7 +310,10 @@ impl Workbench {
                     })),
                 ),
         );
-        if self.analysis.references {
+        if self.analysis.mode == FlowMode::Calls {
+            return root.child(self.calls_view(cx));
+        }
+        if self.analysis.mode == FlowMode::References {
             return root.child(self.references_view(cx));
         }
         let Some(function) = self.selected_function() else {
@@ -466,6 +500,167 @@ impl Workbench {
             div().p_3().text_size(px(11.0)).text_color(rgb(0xe0af68)).child("Graph shows the first 64 blocks; use Listing for the remaining locations.")))
     }
 
+    fn set_call_page(&mut self, direction: usize, page: usize, cx: &mut Context<Self>) {
+        let Some(function) = self.selected_function() else {
+            return;
+        };
+        let offset = function.offset;
+        if self.analysis.call_context != Some(offset) {
+            self.analysis.call_pages = [0, 0];
+            self.analysis.call_context = Some(offset);
+        }
+        self.analysis.call_pages[direction] = page;
+        self.scroll.set_offset(point(px(0.0), px(0.0)));
+        cx.notify();
+    }
+
+    fn calls_view(&self, cx: &Context<Self>) -> Div {
+        let mut root = div().flex().flex_col().min_w_full();
+        let (Some(analysis), Some(graph), Some(function)) = (
+            self.analysis.result.as_ref(),
+            self.analysis.calls.as_ref(),
+            self.selected_function(),
+        ) else {
+            return root.child(
+                div()
+                    .p_4()
+                    .child("Choose a recovered function after analysis finishes."),
+            );
+        };
+        let Some(selected) = analysis
+            .functions
+            .iter()
+            .position(|candidate| candidate.offset == function.offset)
+        else {
+            return root;
+        };
+        root = root.child(div().p_3().child(format!("{} · {:x}", function.name, function.address)))
+            .child(div().px_3().pb_2().text_size(px(11.0)).text_color(rgb(0x8590a3)).whitespace_normal()
+                .child("Candidate call sites in this analysis. Shared tails can have multiple callers. Indirect calls and missing function entries stay unresolved; jumps are not inferred as tail calls."));
+        let mut columns = div().flex().gap_2();
+        for (direction, (title, indices)) in [
+            ("Callers", &graph.incoming[selected]),
+            ("Calls from this function", &graph.outgoing[selected]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let last = indices.len().saturating_sub(1) / CALL_PAGE_ROWS;
+            let page = if self.analysis.call_context == Some(function.offset) {
+                self.analysis.call_pages[direction].min(last)
+            } else {
+                0
+            };
+            let mut pane = div()
+                .id(("call-pane", direction))
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_color(rgb(0x7aa2f7))
+                        .child(format!("{title} · {} sites", indices.len())),
+                );
+            if indices.is_empty() {
+                pane = pane.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_color(rgb(0x8590a3))
+                        .child("No recorded call sites."),
+                );
+            }
+            for &index in indices
+                .iter()
+                .skip(page * CALL_PAGE_ROWS)
+                .take(CALL_PAGE_ROWS)
+            {
+                let site = &graph.sites[index];
+                let peer = if direction == 0 {
+                    Some(site.caller)
+                } else {
+                    site.callee
+                };
+                let offset = site.offset;
+                let caller_offset = analysis.functions[site.caller].offset;
+                let mut row = div()
+                    .id(("call-site", index))
+                    .flex()
+                    .items_center()
+                    .h(px(30.0))
+                    .gap_1()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(rgb(0x1b2028));
+                if let Some(peer) = peer {
+                    let peer = &analysis.functions[peer];
+                    let peer_offset = peer.offset;
+                    row = row.child(
+                        button(peer.name.clone())
+                            .debug_selector(|| format!("call-peer-{direction}-{index}"))
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.analysis.focused_function = Some(peer_offset);
+                                this.go(peer_offset, cx);
+                                this.lens = Lens::Flow;
+                                this.analysis.mode = FlowMode::Calls;
+                            })),
+                    );
+                } else {
+                    row = row.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(0xe0af68))
+                            .child(match site.target_address {
+                                Some(address) => format!(
+                                    "{address:x} · no recovered function ({:?})",
+                                    site.resolution
+                                ),
+                                None => format!("Unknown target ({:?})", site.resolution),
+                            }),
+                    );
+                }
+                pane = pane.child(
+                    row.child(
+                        button(format!("at {:x}", site.address))
+                            .debug_selector(|| format!("call-location-{direction}-{index}"))
+                            .font_family("DejaVu Sans Mono")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.analysis.focused_function = Some(caller_offset);
+                                this.go(offset, cx);
+                                this.lens = Lens::Assembly;
+                            })),
+                    ),
+                );
+            }
+            pane = pane.child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .px_2()
+                    .py_2()
+                    .child(
+                        button("Previous").on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_call_page(direction, page.saturating_sub(1), cx)
+                        })),
+                    )
+                    .child(button("Next").on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_call_page(direction, page.saturating_add(1).min(last), cx)
+                    })))
+                    .child(format!("Page {} / {}", page + 1, last + 1)),
+            );
+            columns = columns.child(pane);
+        }
+        root.child(columns)
+    }
+
     fn references_view(&self, cx: &Context<Self>) -> Div {
         let mut root = div().flex().flex_col().min_w_full();
         let Some(analysis) = &self.analysis.result else {
@@ -565,6 +760,7 @@ impl Workbench {
     }
 }
 
+const CALL_PAGE_ROWS: usize = 32;
 const MAX_NODES: usize = 64;
 const NODE_LINES: usize = 6;
 const NODE_WIDTH: f32 = 320.0;
@@ -714,6 +910,105 @@ mod reference_tests {
     use ale_systems_core::{CrossReference, ReferenceKind};
     use gpui::TestAppContext;
 
+    fn calls_fixture(count: usize) -> BinaryImage {
+        let (image, _) = crate::decompiler::tests::fixture();
+        let mut bytes = image.bytes().to_vec();
+        bytes.resize(0x700, 0);
+        bytes.copy_within(0x200..0x2c0, 0x500);
+        bytes.copy_within(0x180..0x190, 0x480);
+        bytes[40..48].copy_from_slice(&0x500u64.to_le_bytes());
+        bytes[0x598..0x5a0].copy_from_slice(&0x480u64.to_le_bytes());
+        let length = count * 5 + 2;
+        bytes[0x560..0x568].copy_from_slice(&(length as u64).to_le_bytes());
+        for index in 0..count {
+            let offset = 0x100 + index * 5;
+            bytes[offset] = 0xe8;
+            bytes[offset + 1..offset + 5]
+                .copy_from_slice(&((count * 5 + 1 - (index * 5 + 5)) as i32).to_le_bytes());
+        }
+        bytes[0x100 + count * 5..0x100 + length].fill(0xc3);
+        BinaryImage::parse(bytes).unwrap()
+    }
+
+    #[gpui::test]
+    fn call_relationship_buttons_navigate_functions_and_exact_sites(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            Workbench::new(PathBuf::from("calls.elf"), calls_fixture(1), cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.analysis.calls.as_ref().unwrap().sites.len(), 1);
+                view.go(0x100, cx);
+                view.lens = Lens::Flow;
+                view.analysis.mode = FlowMode::Calls;
+            })
+        });
+        for (selector, offset, lens) in [
+            ("call-peer-1-0", 0x106, Lens::Flow),
+            ("call-peer-0-0", 0x100, Lens::Flow),
+            ("call-location-1-0", 0x100, Lens::Assembly),
+        ] {
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                gpui::size(px(1200.0), px(800.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("call navigation control painted");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.update(|_, cx| {
+                view.update(cx, |view, _| {
+                    assert_eq!(view.offset, offset);
+                    assert_eq!(view.lens, lens);
+                })
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn call_pages_retain_sites_and_patch_refresh_clears_old_relationships(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            Workbench::new(PathBuf::from("calls.elf"), calls_fixture(65), cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.analysis.calls.as_ref().unwrap().sites.len(), 65);
+                view.go(0x100, cx);
+                view.lens = Lens::Flow;
+                view.analysis.mode = FlowMode::Calls;
+                view.set_call_page(1, 1, cx);
+            })
+        });
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            gpui::size(px(1200.0), px(1000.0)),
+            |_, _| view.clone().into_any_element(),
+        );
+        let bounds = cx
+            .debug_bounds("call-location-1-32")
+            .expect("second page starts at site 32");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.offset, 0x100 + 32 * 5);
+                view.image = Arc::new(view.image.patched(0x100, &[0xc3]).unwrap());
+                view.revision += 1;
+                view.refresh_analysis(cx);
+                assert!(view.analysis.calls.is_none());
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                assert!(view.analysis.calls.as_ref().unwrap().sites.is_empty());
+                assert_eq!(view.analysis.call_pages, [0, 0]);
+            })
+        });
+    }
+
     #[gpui::test]
     fn data_target_opens_bytes_and_source_returns_to_assembly(cx: &mut TestAppContext) {
         let (image, mut analysis) = crate::decompiler::tests::fixture();
@@ -731,7 +1026,7 @@ mod reference_tests {
         cx.update(|_, cx| {
             view.update(cx, |view, cx| {
                 view.analysis.result = Some(Arc::new(analysis));
-                view.analysis.references = true;
+                view.analysis.mode = FlowMode::References;
                 view.go(0x100, cx);
                 view.lens = Lens::Flow;
             })

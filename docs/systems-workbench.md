@@ -123,6 +123,15 @@ not resolve indirect call targets. These references identify the operand's start
 address, not the full access range or a runtime value. Register-based pointers,
 FS/GS memory accesses, relocations and immediate-address inference are not recovered.
 
+Flow → Calls shows callers and calls from the selected function. Select a function
+name to explore its relationships, or an `at` address to inspect the exact call
+instruction in Assembly. Each column has pages of 32 call sites. Multiple calls
+to one function remain separate sites. Recursive calls are retained. Shared code
+can appear under multiple candidate callers; this view does not prove ownership.
+Indirect calls, missing function entries, and analysis-limit results remain
+explicit. Jumps are not inferred as tail calls. Counts cover the current bounded
+analysis, not every call that could occur at runtime.
+
 Analysis runs in the background. Applying, undoing, or redoing a patch refreshes
 the analysis to match the displayed bytes. Raw bytes, ambiguous mappings and other
 architectures report unsupported analysis rather than guessing executable code.
