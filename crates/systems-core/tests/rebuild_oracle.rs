@@ -85,7 +85,7 @@ fn run_owned_args(path: &Path, args: &[&str]) -> (Output, String) {
     }
     (child.wait_with_output().unwrap(), maps)
 }
-fn build(label: &str) -> (Fixture, Vec<u8>, Vec<u8>, u64, u64) {
+fn build(label: &str, pie: bool) -> (Fixture, Vec<u8>, Vec<u8>, u64, u64) {
     for tool in ["/usr/bin/cc", "/usr/bin/readelf", "/usr/bin/objdump"] {
         assert!(Path::new(tool).is_file(), "required tool missing: {tool}");
     }
@@ -120,7 +120,8 @@ int main(void) {
         "/usr/bin/cc",
         &[
             "-O1",
-            "-no-pie",
+            if pie { "-pie" } else { "-no-pie" },
+            if pie { "-fPIE" } else { "-fno-pie" },
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
             "-fcf-protection=none",
@@ -280,7 +281,7 @@ fn run_export(root: &Fixture, label: &str) -> (Output, String) {
 }
 #[test]
 fn grown_et_exec_loads_through_original_entry() {
-    let (root, input, output, entry, body) = build("growth");
+    let (root, input, output, entry, body) = build("growth", false);
     let (result, maps) = run_export(&root, "growth");
     assert!(
         result.status.success(),
@@ -323,7 +324,7 @@ fn grown_et_exec_loads_through_original_entry() {
 }
 #[test]
 fn mapped_program_headers_match_auxv() {
-    let (root, _, output, _, _) = build("auxv");
+    let (root, _, output, _, _) = build("auxv", false);
     let (result, _) = run_export(&root, "auxv");
     assert!(result.status.success());
     let (_, phdr, phnum, phent, hash) = parse_output(&result.stdout);
@@ -448,6 +449,13 @@ void _start(void) { long r=example(7); __asm__ volatile("syscall" : : "a"(60), "
 
 #[test]
 fn et_exec_resolves_helper_existing_data_and_readonly_constants() {
+    exercise_calls_data(false);
+}
+#[test]
+fn pie_resolves_helper_existing_data_and_readonly_constants() {
+    exercise_calls_data(true);
+}
+fn exercise_calls_data(pie: bool) {
     use ale_systems_core::{AnalysisLimits, Architecture, EdgeKind};
     let root = Fixture::new();
     let src = root.0.join("original.c");
@@ -468,12 +476,15 @@ int example(int x){unsigned i=(unsigned)x&7; counter+=table[i]; return helper(co
 "#;
     fs::write(&src, original).unwrap();
     fs::write(&edit, replacement).unwrap();
+    let mode = if pie { "-pie" } else { "-no-pie" };
+    let pic = if pie { "-fPIE" } else { "-fno-pie" };
     run_tool(
         "/usr/bin/cc",
         &[
             "-g",
             "-O1",
-            "-no-pie",
+            mode,
+            pic,
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
             "-fcf-protection=none",
@@ -693,13 +704,37 @@ int example(int x){unsigned i=(unsigned)x&7; counter+=table[i]; return helper(co
         ));
     }
     assert_eq!(fs::read(&orig).unwrap(), input);
-    save("calls-runtime.txt", observations.as_bytes());
-    save("calls-original.c", original.as_bytes());
-    save("calls-replacement.c", replacement.as_bytes());
-    save("calls-original.elf", &input);
-    save("calls-replacement.o", &fs::read(object).unwrap());
-    save("calls-export.elf", &output);
-    save("calls-object-readelf.txt", &objdump.stdout);
+    save(
+        &format!("{}-runtime.txt", if pie { "pie-calls" } else { "calls" }),
+        observations.as_bytes(),
+    );
+    save(
+        &format!("{}-original.c", if pie { "pie-calls" } else { "calls" }),
+        original.as_bytes(),
+    );
+    save(
+        &format!("{}-replacement.c", if pie { "pie-calls" } else { "calls" }),
+        replacement.as_bytes(),
+    );
+    save(
+        &format!("{}-original.elf", if pie { "pie-calls" } else { "calls" }),
+        &input,
+    );
+    save(
+        &format!("{}-replacement.o", if pie { "pie-calls" } else { "calls" }),
+        &fs::read(object).unwrap(),
+    );
+    save(
+        &format!("{}-export.elf", if pie { "pie-calls" } else { "calls" }),
+        &output,
+    );
+    save(
+        &format!(
+            "{}-object-readelf.txt",
+            if pie { "pie-calls" } else { "calls" }
+        ),
+        &objdump.stdout,
+    );
 }
 
 #[test]
@@ -913,4 +948,306 @@ fn et_exec_rejects_bss_dynamic_relocations_and_ambiguous_data() {
         save(&format!("negative-{label}-source.c"), source.as_bytes());
         save(&format!("negative-{label}-readelf.txt"), &report.stdout);
     }
+}
+
+#[test]
+fn pie_auxv_mappings_and_aslr_preserve_relocated_behavior() {
+    let (root, _, output, _, body) = build("pie-aslr", true);
+    let phoff = u64::from_le_bytes(output[32..40].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(output[56..58].try_into().unwrap()) as usize;
+    let ph = &output[phoff..phoff + phnum * 56];
+    let file_phdr = u64::from_le_bytes(ph[16..24].try_into().unwrap());
+    let expected_hex: String = ph.iter().map(|b| format!("{b:02x}")).collect();
+    let aslr = fs::read_to_string("/proc/sys/kernel/randomize_va_space").expect("read ASLR policy");
+    assert_ne!(
+        aslr.trim(),
+        "0",
+        "ASLR is disabled; PIE variation cannot be established"
+    );
+    let mut biases = std::collections::BTreeSet::new();
+    let mut samples = String::new();
+    let mut all_maps = String::new();
+    for index in 0..8 {
+        let (result, maps) = run_owned(&root.0.join("export.elf"));
+        assert!(result.status.success());
+        let (value, phdr, count, entry_size, _) = parse_output(&result.stdout);
+        assert_eq!((value, count, entry_size), (197, phnum as u64, 56));
+        let text = std::str::from_utf8(&result.stdout).unwrap();
+        let actual = text
+            .split_whitespace()
+            .find_map(|v| v.strip_prefix("phbytes="))
+            .unwrap();
+        assert_eq!(actual, expected_hex);
+        let bias = phdr.checked_sub(file_phdr).expect("load bias");
+        biases.insert(bias);
+        let entries: Vec<_> = maps
+            .lines()
+            .filter(|line| line.contains("export.elf"))
+            .collect();
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .any(|line| line.starts_with(&format!("{:x}-", body + bias))
+                    && line.split_whitespace().nth(1) == Some("r-xp"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|line| line.starts_with(&format!("{phdr:x}-"))
+                    && line.split_whitespace().nth(1) == Some("r--p"))
+        );
+        assert!(entries.iter().all(|line| {
+            !line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .starts_with("rwx")
+        }));
+        samples.push_str(&format!("sample={index} bias={bias:#x} {text}"));
+        all_maps.push_str(&format!("sample={index}\n{maps}"));
+    }
+    assert!(biases.len() > 1, "host did not exhibit ASLR variation");
+    save("pie-aslr-samples.txt", samples.as_bytes());
+    save("pie-aslr-maps.txt", all_maps.as_bytes());
+    save("pie-aslr-policy.txt", aslr.as_bytes());
+}
+
+#[test]
+fn pie_rejects_dsos_static_pie_and_unsupported_relocations() {
+    use ale_systems_core::rebuild::RebuildErrorCode;
+    let root = Fixture::new();
+    let src = root.0.join("source.c");
+    let edit = root.0.join("edit.c");
+    let source = "__attribute__((noinline)) int example(int x){return x*x+17;} int main(void){return example(3);}\n";
+    fs::write(&src, source).unwrap();
+    let dso = root.0.join("library.so");
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-shared",
+            "-fPIC",
+            "-O1",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fcf-protection=none",
+            src.to_str().unwrap(),
+            "-o",
+            dso.to_str().unwrap(),
+        ],
+    );
+    let static_src = root.0.join("static.c");
+    let static_pie = root.0.join("static-pie.elf");
+    fs::write(&static_src,"__attribute__((noinline)) int example(int x){return x*x+17;} void _start(void){long r=example(3); __asm__ volatile(\"syscall\": : \"a\"(60),\"D\"(r):\"rcx\",\"r11\",\"memory\"); __builtin_unreachable();}\n").unwrap();
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-nostdlib",
+            "-static-pie",
+            "-O1",
+            "-fPIE",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fcf-protection=none",
+            static_src.to_str().unwrap(),
+            "-o",
+            static_pie.to_str().unwrap(),
+        ],
+    );
+    let pie = root.0.join("main.elf");
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-pie",
+            "-fPIE",
+            "-O1",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fcf-protection=none",
+            src.to_str().unwrap(),
+            "-o",
+            pie.to_str().unwrap(),
+        ],
+    );
+    let c = AtomicBool::new(false);
+    let object = root.0.join("edit.o");
+    fs::write(
+        &edit,
+        "int example(int x){volatile int v=x+4;return v*3;}\n",
+    )
+    .unwrap();
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-c",
+            "-O1",
+            "-ffreestanding",
+            "-fno-builtin",
+            "-fno-stack-protector",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fno-jump-tables",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-fpie",
+            "-fno-optimize-sibling-calls",
+            edit.to_str().unwrap(),
+            "-o",
+            object.to_str().unwrap(),
+        ],
+    );
+    let unit = RelocatableUnit::parse(
+        &fs::read(&object).unwrap(),
+        "example",
+        &RebuildLimits::default(),
+        &c,
+    )
+    .unwrap();
+    for (label, path) in [("dso", &dso), ("static-pie", &static_pie)] {
+        let input = fs::read(path).unwrap();
+        let image = BinaryImage::parse(input.clone()).unwrap();
+        let address = image
+            .symbols
+            .iter()
+            .find(|s| s.name == "example")
+            .unwrap()
+            .address;
+        let site = ReplacementSite::discover(&image, address).unwrap();
+        let error = plan_replacement(
+            &image,
+            &site,
+            &unit,
+            RebuildOptions {
+                mode: PlacementMode::Relocated,
+                limits: RebuildLimits::default(),
+            },
+            &c,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, RebuildErrorCode::UnsupportedImage, "{label}");
+        assert_eq!(fs::read(path).unwrap(), input);
+        let report = run_tool(
+            "/usr/bin/readelf",
+            &["-h", "-lW", "-dW", path.to_str().unwrap()],
+        );
+        save(&format!("pie-negative-{label}.txt"), &report.stdout);
+    }
+    let cases = [
+        (
+            "absolute",
+            "extern int counter; unsigned long example(int x){return (unsigned long)&counter+(unsigned)x;}",
+            "-fno-pie",
+            "R_X86_64_32",
+        ),
+        (
+            "got",
+            "extern int counter; int example(int x){return counter+x;}",
+            "-fPIC",
+            "GOTPCREL",
+        ),
+        (
+            "tls",
+            "extern __thread int counter; int example(int x){return counter+x;}",
+            "-fPIC",
+            "TLS",
+        ),
+    ];
+    for (label, source, flag, expected_relocation) in cases {
+        fs::write(&edit, source).unwrap();
+        run_tool(
+            "/usr/bin/cc",
+            &[
+                "-c",
+                "-O1",
+                "-ffreestanding",
+                "-fno-builtin",
+                "-fno-stack-protector",
+                "-fno-asynchronous-unwind-tables",
+                "-fno-unwind-tables",
+                "-fno-jump-tables",
+                "-ffunction-sections",
+                "-fdata-sections",
+                flag,
+                "-fno-optimize-sibling-calls",
+                edit.to_str().unwrap(),
+                "-o",
+                object.to_str().unwrap(),
+            ],
+        );
+        let report = run_tool("/usr/bin/readelf", &["-rW", object.to_str().unwrap()]);
+        assert!(
+            String::from_utf8_lossy(&report.stdout).contains(expected_relocation),
+            "{label}"
+        );
+        assert!(
+            RelocatableUnit::parse(
+                &fs::read(&object).unwrap(),
+                "example",
+                &RebuildLimits::default(),
+                &c
+            )
+            .is_err(),
+            "{label}"
+        );
+        save(&format!("pie-negative-{label}.txt"), &report.stdout);
+    }
+    fs::write(
+        &edit,
+        "extern int imported(int); int example(int x){return imported(x)+1;}\n",
+    )
+    .unwrap();
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-c",
+            "-O1",
+            "-ffreestanding",
+            "-fno-builtin",
+            "-fno-stack-protector",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fno-jump-tables",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-fpie",
+            "-fno-optimize-sibling-calls",
+            edit.to_str().unwrap(),
+            "-o",
+            object.to_str().unwrap(),
+        ],
+    );
+    let report = run_tool("/usr/bin/readelf", &["-rW", object.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&report.stdout).contains("R_X86_64_PLT32"));
+    let unit = RelocatableUnit::parse(
+        &fs::read(&object).unwrap(),
+        "example",
+        &RebuildLimits::default(),
+        &c,
+    )
+    .unwrap();
+    let input = fs::read(&pie).unwrap();
+    let image = BinaryImage::parse(input.clone()).unwrap();
+    let address = image
+        .symbols
+        .iter()
+        .find(|s| s.name == "example")
+        .unwrap()
+        .address;
+    let site = ReplacementSite::discover(&image, address).unwrap();
+    let error = plan_replacement(
+        &image,
+        &site,
+        &unit,
+        RebuildOptions {
+            mode: PlacementMode::Relocated,
+            limits: RebuildLimits::default(),
+        },
+        &c,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, RebuildErrorCode::UndefinedSymbol);
+    assert_eq!(fs::read(&pie).unwrap(), input);
+    save("pie-negative-import.txt", &report.stdout);
 }

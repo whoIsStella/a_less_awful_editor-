@@ -44,7 +44,9 @@ pub(super) fn parse_table(
                 }
                 n
             }
-            1 | 2 | 6 | 7 | 8 | 16 | 17 | 18 | 36 | 37 | 38 => 16,
+            2 => 4,
+            1 | 6 | 7 | 8 | 16 | 17 | 18 | 37 | 38 => 8,
+            36 => 16,
             _ => return Err(invalid("Unsupported original dynamic relocation kind")),
         };
         let end = address

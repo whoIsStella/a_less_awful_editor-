@@ -872,7 +872,7 @@ fn admission_dynamic_relocations_validate_raw_ranges_and_symbol_indices() {
     put64(&mut bytes, 0, 0x401005);
     put64(&mut bytes, 8, (2u64 << 32) | 7);
     let ranges = parse_table(&bytes, true, 3, &[0, 4, 64]).unwrap();
-    assert_eq!(ranges, vec![0x401005..0x401015]);
+    assert_eq!(ranges, vec![0x401005..0x40100d]);
     assert!(parse_table(&bytes[..23], true, 3, &[0, 4, 64]).is_err());
     put64(&mut bytes, 8, (3u64 << 32) | 7);
     assert!(parse_table(&bytes, true, 3, &[0, 4, 64]).is_err());
@@ -948,7 +948,7 @@ fn admission_dynamic_tags_must_match_validated_mapped_sections() {
     put64(&mut b, 0x308, (1u64 << 32) | 7);
     assert_eq!(
         inspect_dynamic(&b, &h, 0x400, 4, 4096).unwrap(),
-        vec![0x400370..0x400380]
+        vec![0x400370..0x400378]
     );
     let mut bad = b.clone();
     put64(&mut bad, 0x148, 0x400301);
@@ -1492,5 +1492,50 @@ fn metadata_reopened_image_cross_checks_note_entry_and_body() {
                 .any(|w| w.contains("rewrite metadata"))
         );
         assert!(super::elf::inspect_image(&reopened, &site, &RebuildLimits::default()).is_err());
+    }
+}
+
+#[test]
+fn relocation_pc32_is_invariant_under_shared_load_bias() {
+    let expected = super::relocate::evaluate_pc32(0x2000, -4, 0x1001).unwrap();
+    for bias in [0u64, 0x10000000, 0x7f0000000000] {
+        assert_eq!(
+            super::relocate::evaluate_pc32(0x2000 + bias, -4, 0x1001 + bias).unwrap(),
+            expected
+        );
+    }
+}
+#[test]
+fn admission_pie_requires_interpreter_and_pie_identity() {
+    let (image, site) = loadable_fixture();
+    let mut bytes = image.bytes().to_vec();
+    put16(&mut bytes, 16, 3);
+    let mut candidate = image.clone();
+    candidate.bytes = bytes.into();
+    assert!(super::elf::inspect_image(&candidate, &site, &RebuildLimits::default()).is_err());
+}
+
+#[test]
+fn admission_dynamic_relocation_widths_match_x86_64_abi() {
+    let mut b = vec![0u8; 24];
+    put64(&mut b, 0, 0x4018);
+    for (kind, width) in [
+        (1u64, 8u64),
+        (2, 4),
+        (6, 8),
+        (7, 8),
+        (8, 8),
+        (16, 8),
+        (17, 8),
+        (18, 8),
+        (36, 16),
+        (37, 8),
+        (38, 8),
+    ] {
+        put64(&mut b, 8, kind);
+        assert_eq!(
+            super::dynamic::parse_table(&b, true, 1, &[0]).unwrap(),
+            vec![0x4018..0x4018 + width]
+        );
     }
 }

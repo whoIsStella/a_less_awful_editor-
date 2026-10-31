@@ -86,7 +86,7 @@ pub(super) fn inspect_image(
     }
     if b.get(..7) != Some(b"\x7fELF\x02\x01\x01")
         || !matches!(b.get(7), Some(0 | 3))
-        || u16le(b, 16)? != 2
+        || !matches!(u16le(b, 16)?, 2 | 3)
         || u16le(b, 18)? != 62
         || u32le(b, 20)? != 1
     {
@@ -303,6 +303,9 @@ pub(super) fn inspect_image(
             }
         }
         headers.push(h);
+    }
+    if u16le(b, 16)? == 3 {
+        validate_pie_identity(b, &headers)?;
     }
     if !selected {
         return Err(error(
@@ -710,3 +713,58 @@ pub(super) fn check_notes(bytes: &[u8]) -> Result<(), RebuildError> {
 
 #[cfg(test)]
 pub(super) use super::writer::write_candidate;
+
+fn validate_pie_identity(bytes: &[u8], headers: &[ProgramHeader]) -> Result<(), RebuildError> {
+    let bad = || {
+        error(
+            RebuildErrorCode::UnsupportedImage,
+            "PIE rebuilding requires a main executable with a valid interpreter and PIE dynamic flag",
+        )
+    };
+    let mut interp = None;
+    let mut load_seen = false;
+    for h in headers {
+        if h.kind == 1 {
+            load_seen = true;
+        }
+        if h.kind == 3 && (load_seen || interp.replace(h).is_some()) {
+            return Err(bad());
+        }
+    }
+    let interp = interp.ok_or_else(bad)?;
+    let start = usize::try_from(interp.offset).map_err(|_| bad())?;
+    let len = usize::try_from(interp.file_size).map_err(|_| bad())?;
+    let path = bytes
+        .get(start..start.checked_add(len).ok_or_else(bad)?)
+        .ok_or_else(bad)?;
+    if path.len() < 2 || path.last() != Some(&0) || path[..path.len() - 1].contains(&0) {
+        return Err(bad());
+    }
+    let mut dynamic = headers.iter().filter(|h| h.kind == 2);
+    let segment = dynamic.next().ok_or_else(bad)?;
+    if dynamic.next().is_some() || segment.file_size % 16 != 0 {
+        return Err(bad());
+    }
+    let start = usize::try_from(segment.offset).map_err(|_| bad())?;
+    let len = usize::try_from(segment.file_size).map_err(|_| bad())?;
+    let data = bytes
+        .get(start..start.checked_add(len).ok_or_else(bad)?)
+        .ok_or_else(bad)?;
+    let mut flags = None;
+    let mut terminated = false;
+    for record in data.chunks_exact(16) {
+        let tag = u64::from_le_bytes(record[..8].try_into().map_err(|_| bad())?);
+        let value = u64::from_le_bytes(record[8..].try_into().map_err(|_| bad())?);
+        if tag == 0 {
+            terminated = true;
+            break;
+        }
+        if tag == 0x6ffffffb && flags.replace(value).is_some() {
+            return Err(bad());
+        }
+    }
+    if !terminated || flags.is_none_or(|v| v & 0x08000000 == 0) {
+        return Err(bad());
+    }
+    Ok(())
+}
