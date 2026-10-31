@@ -849,14 +849,16 @@ fn relocation_sites_require_real_call_or_rip_displacement_fields() {
         classify_site(&[0x8b, 0x05, 0, 0, 0, 0, 0xc3], 2, 2).unwrap(),
         RelocationSite::Data {
             write: false,
-            width: 4
+            width: 4,
+            next_ip_delta: 4
         }
     );
     assert_eq!(
         classify_site(&[0x89, 0x05, 0, 0, 0, 0, 0xc3], 2, 2).unwrap(),
         RelocationSite::Data {
             write: true,
-            width: 4
+            width: 4,
+            next_ip_delta: 4
         }
     );
     assert!(classify_site(&[0xe9, 0, 0, 0, 0], 1, 4).is_err());
@@ -1099,6 +1101,56 @@ fn relocation_resolves_local_calls_self_recursion_and_data_permissions() {
             .code,
         RebuildErrorCode::Cancelled
     );
+}
+
+#[test]
+fn relocation_data_bounds_account_for_immediates_after_displacement() {
+    use super::relocate::{Definition, DefinitionKind, resolve_unit};
+    use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+    let (image, site) = loadable_fixture();
+    let mut original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    original.definitions.push(Definition {
+        name: "ext".into(),
+        address: 0x4ff000,
+        size: 1,
+        kind: DefinitionKind::Data,
+        binding: 0,
+        visibility: 0,
+        file_backed: true,
+        readable: true,
+        executable: false,
+        writable: true,
+        dynamic_relocated: false,
+    });
+    let placement = super::layout::AppendLayout {
+        section_addresses: BTreeMap::from([(1, 0x500000)]),
+        body_address: 0x500000,
+        ..Default::default()
+    };
+    let cancel = AtomicBool::new(false);
+    // Both instructions have an imm8 after their disp32: next RIP is P+5.
+    for opcode in [0x80, 0xc6] {
+        let mut object = relocation_object();
+        let modrm = if opcode == 0x80 { 0x3d } else { 0x05 };
+        object[0x100..0x108].copy_from_slice(&[opcode, modrm, 0, 0, 0, 0, 1, 0xc3]);
+        put64(&mut object, 0x300, 2);
+        put64(&mut object, 0x308, (2u64 << 32) | 2);
+        object[0x310..0x318].copy_from_slice(&(-5i64).to_le_bytes());
+        let unit =
+            RelocatableUnit::parse(&object, "example", &RebuildLimits::default(), &cancel).unwrap();
+        assert!(
+            resolve_unit(&unit, &original, &placement, &cancel).is_ok(),
+            "valid opcode {opcode:x}"
+        );
+        // A forged -4 addend accesses one byte past the one-byte symbol.
+        object[0x310..0x318].copy_from_slice(&(-4i64).to_le_bytes());
+        let unit =
+            RelocatableUnit::parse(&object, "example", &RebuildLimits::default(), &cancel).unwrap();
+        assert!(
+            resolve_unit(&unit, &original, &placement, &cancel).is_err(),
+            "out of bounds opcode {opcode:x}"
+        );
+    }
 }
 
 #[test]

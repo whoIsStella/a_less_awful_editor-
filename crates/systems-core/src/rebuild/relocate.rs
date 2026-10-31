@@ -95,7 +95,11 @@ pub(super) fn bind_external(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RelocationSite {
     Call,
-    Data { write: bool, width: u64 },
+    Data {
+        write: bool,
+        width: u64,
+        next_ip_delta: u64,
+    },
 }
 fn cancelled(cancel: &std::sync::atomic::AtomicBool) -> Result<(), RebuildError> {
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -166,6 +170,10 @@ fn classify_sites(
                         RelocationSite::Data {
                             write,
                             width: ins.memory_size().size().max(1) as u64,
+                            next_ip_delta: ins
+                                .next_ip()
+                                .checked_sub(displacement)
+                                .ok_or_else(bad)?,
                         },
                     );
                 }
@@ -341,7 +349,12 @@ pub(super) fn resolve_unit(
             (address, address..end, kind)
         };
         if let Some(site) = site {
-            let effective = i128::from(target) + i128::from(relocation.addend) + 4;
+            let next_ip_delta = match site {
+                RelocationSite::Call => 4,
+                RelocationSite::Data { next_ip_delta, .. } => next_ip_delta,
+            };
+            let effective =
+                i128::from(target) + i128::from(relocation.addend) + i128::from(next_ip_delta);
             let effective =
                 u64::try_from(effective).map_err(|_| bad("Relocation target address overflow"))?;
             match site {
@@ -351,7 +364,7 @@ pub(super) fn resolve_unit(
                     }
                     allowed_calls.insert(target);
                 }
-                RelocationSite::Data { write, width } => {
+                RelocationSite::Data { write, width, .. } => {
                     data_fields.insert(place);
                     if kind != DefinitionKind::Data
                         || effective < range.start
