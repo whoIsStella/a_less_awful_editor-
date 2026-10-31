@@ -168,7 +168,7 @@ mod dynamic;
 
 mod layout;
 
-mod metadata;
+pub(crate) mod metadata;
 pub use metadata::RewriteLocation;
 
 mod writer;

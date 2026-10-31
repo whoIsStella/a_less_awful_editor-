@@ -1454,3 +1454,43 @@ fn admission_rejects_entry_overlap_with_other_section() {
     bad.bytes = bytes.into();
     assert!(super::elf::inspect_image(&bad, &site, &RebuildLimits::default()).is_err());
 }
+
+#[test]
+fn metadata_reopened_image_cross_checks_note_entry_and_body() {
+    let (image, site, layout, resolved) = writer_fixture();
+    let original = super::elf::inspect_image(&image, &site, &RebuildLimits::default()).unwrap();
+    let candidate = super::elf::write_candidate(&image, &original, &layout, &resolved).unwrap();
+    let reopened = BinaryImage::parse(candidate.clone()).unwrap();
+    assert_eq!(
+        reopened.rewrite_locations(),
+        &[RewriteLocation {
+            entry_address: site.address,
+            original_capacity: site.capacity as u64,
+            body_address: layout.body_address,
+            body_size: layout.text_file.len() as u64
+        }]
+    );
+    assert_eq!(
+        reopened.address_to_offset(layout.body_address),
+        Some(layout.text_file.start)
+    );
+    for offset in [
+        layout.note_file.start,
+        layout.note_file.start + 16,
+        layout.note_file.start + 36,
+        site.offset,
+    ] {
+        let mut bad = candidate.clone();
+        bad[offset] ^= 0x40;
+        let reopened = BinaryImage::parse(bad).unwrap();
+        assert!(reopened.rewrite_locations().is_empty());
+        assert!(reopened.source_locations.is_empty());
+        assert!(
+            reopened
+                .warnings
+                .iter()
+                .any(|w| w.contains("rewrite metadata"))
+        );
+        assert!(super::elf::inspect_image(&reopened, &site, &RebuildLimits::default()).is_err());
+    }
+}

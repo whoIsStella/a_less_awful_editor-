@@ -29,6 +29,7 @@ fn image(bytes: &[u8]) -> BinaryImage {
             size: bytes.len(),
         }],
         source_end_prefix: Vec::new(),
+        rewrite_locations: Vec::new(),
     }
 }
 

@@ -146,6 +146,7 @@ pub struct BinaryImage {
     pub warnings: Vec<String>,
     mappings: Vec<Mapping>,
     source_end_prefix: Vec<u64>,
+    rewrite_locations: Vec<rebuild::RewriteLocation>,
 }
 
 impl BinaryImage {
@@ -166,6 +167,7 @@ impl BinaryImage {
                 warnings: vec!["Unrecognized format: bytes remain available; select an architecture before disassembly".into()],
                 mappings: Vec::new(),
                 source_end_prefix: Vec::new(),
+                rewrite_locations: Vec::new(),
             });
         }
         let object = object::File::parse(bytes.as_slice())
@@ -286,9 +288,9 @@ impl BinaryImage {
             ))
         });
         source_locations.dedup();
-        let source_end_prefix = source_end_prefix(&source_locations);
+        let initial_source_end_prefix = source_end_prefix(&source_locations);
         let entry = (object.kind() != object::ObjectKind::Relocatable).then(|| object.entry());
-        Ok(Self {
+        let mut image = Self {
             bytes: bytes.into(),
             format,
             architecture,
@@ -298,8 +300,33 @@ impl BinaryImage {
             source_locations,
             warnings,
             mappings,
-            source_end_prefix,
-        })
+            source_end_prefix: initial_source_end_prefix,
+            rewrite_locations: Vec::new(),
+        };
+        match rebuild::metadata::read_rewrite_location(&image) {
+            Ok(Some(location)) => {
+                let end = location.entry_address + location.original_capacity;
+                image.source_locations.retain(|line| {
+                    line.address >= end || line.end_address <= location.entry_address
+                });
+                image.source_end_prefix = source_end_prefix(&image.source_locations);
+                image.warnings.push("Source mappings over the rewritten entry are unavailable; injected code has no source mapping.".into());
+                image.rewrite_locations.push(location);
+            }
+            Ok(None) => {}
+            Err(detail) => {
+                image.source_locations.clear();
+                image.source_end_prefix.clear();
+                image.warnings.push(format!(
+                    "Invalid rewrite metadata; source mappings disabled: {detail}"
+                ));
+            }
+        }
+        Ok(image)
+    }
+
+    pub fn rewrite_locations(&self) -> &[rebuild::RewriteLocation] {
+        &self.rewrite_locations
     }
 
     pub fn bytes(&self) -> &[u8] {

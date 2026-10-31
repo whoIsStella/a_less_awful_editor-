@@ -60,7 +60,11 @@ fn save(label: &str, data: &[u8]) {
     }
 }
 fn run_owned(path: &Path) -> (Output, String) {
+    run_owned_args(path, &[])
+}
+fn run_owned_args(path: &Path, args: &[&str]) -> (Output, String) {
     let mut child = Command::new(path)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -440,4 +444,473 @@ void _start(void) { long r=example(7); __asm__ volatile("syscall" : : "a"(60), "
     save("static-original.elf", &input);
     save("static-export.elf", &output);
     save("static-readelf.txt", &readelf.stdout);
+}
+
+#[test]
+fn et_exec_resolves_helper_existing_data_and_readonly_constants() {
+    use ale_systems_core::{AnalysisLimits, Architecture, EdgeKind};
+    let root = Fixture::new();
+    let src = root.0.join("original.c");
+    let orig = root.0.join("original.elf");
+    let edit = root.0.join("replacement.c");
+    let object = root.0.join("replacement.o");
+    let original = r#"#include <stdio.h>
+#include <stdlib.h>
+__attribute__((visibility("hidden"))) int counter=11;
+__attribute__((noinline,visibility("hidden"))) int helper(int x){return 3*x+7;}
+__attribute__((noinline)) int example(int x){return x*x+17;}
+int main(int argc,char **argv){int x=argc>1?atoi(argv[1]):0; int y=example(x); printf("result=%d counter=%d\n",y,counter); return 0;}
+"#;
+    let replacement = r#"extern __attribute__((visibility("hidden"))) int helper(int);
+extern __attribute__((visibility("hidden"))) int counter;
+static const int table[8]={3,7,11,19,29,43,59,83};
+int example(int x){unsigned i=(unsigned)x&7; counter+=table[i]; return helper(counter)+table[(i+3)&7]+x;}
+"#;
+    fs::write(&src, original).unwrap();
+    fs::write(&edit, replacement).unwrap();
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-g",
+            "-O1",
+            "-no-pie",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fcf-protection=none",
+            src.to_str().unwrap(),
+            "-o",
+            orig.to_str().unwrap(),
+        ],
+    );
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-c",
+            "-O1",
+            "-ffreestanding",
+            "-fno-builtin",
+            "-fno-stack-protector",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fno-jump-tables",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-fpie",
+            "-fno-optimize-sibling-calls",
+            edit.to_str().unwrap(),
+            "-o",
+            object.to_str().unwrap(),
+        ],
+    );
+    let objdump = run_tool(
+        "/usr/bin/readelf",
+        &["-rW", "-SW", object.to_str().unwrap()],
+    );
+    let object_report = String::from_utf8_lossy(&objdump.stdout);
+    assert!(
+        object_report.contains("R_X86_64_PC32")
+            && object_report.contains("R_X86_64_PLT32")
+            && object_report.contains(".rodata")
+            && object_report.contains("counter")
+            && object_report.contains("helper")
+    );
+    let input = fs::read(&orig).unwrap();
+    let image = BinaryImage::parse(input.clone()).unwrap();
+    let symbol = |name: &str| {
+        image
+            .symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .address
+    };
+    let entry = symbol("example");
+    let helper = symbol("helper");
+    let counter = symbol("counter");
+    let counter_offset = image.address_to_offset(counter).unwrap();
+    let site = ReplacementSite::discover(&image, entry).unwrap();
+    let helper_offset = image.address_to_offset(helper).unwrap();
+    let entry_source = image
+        .source_at_offset(site.offset)
+        .expect("fixture entry DWARF")
+        .clone();
+    let helper_source = image
+        .source_at_offset(helper_offset)
+        .expect("fixture helper DWARF")
+        .clone();
+    assert!(!image.source_locations.is_empty());
+    let c = AtomicBool::new(false);
+    let unit = RelocatableUnit::parse(
+        &fs::read(&object).unwrap(),
+        "example",
+        &RebuildLimits::default(),
+        &c,
+    )
+    .unwrap();
+    let plan = plan_replacement(
+        &image,
+        &site,
+        &unit,
+        RebuildOptions {
+            mode: PlacementMode::Relocated,
+            limits: RebuildLimits::default(),
+        },
+        &c,
+    )
+    .unwrap();
+    assert!(plan.summary().body_span.len() > site.capacity);
+    assert!(plan.summary().rodata_bytes > 0);
+    let body = plan.summary().body_address;
+    let output = plan.apply_to(&image).unwrap().bytes().to_vec();
+    assert_eq!(
+        &output[counter_offset..counter_offset + 4],
+        &input[counter_offset..counter_offset + 4]
+    );
+    let reopened = BinaryImage::parse(output.clone()).unwrap();
+    assert_eq!(reopened.rewrite_locations().len(), 1);
+    assert!(reopened.source_at_offset(site.offset).is_none());
+    assert_eq!(
+        reopened.source_at_offset(helper_offset),
+        Some(&helper_source)
+    );
+    assert!(
+        entry_source.address < entry + site.capacity as u64 && entry_source.end_address > entry
+    );
+    let note_offset = reopened
+        .sections
+        .iter()
+        .find(|s| s.name == ".note.ale.rewrite")
+        .unwrap()
+        .file_offset;
+    for offset in [note_offset, note_offset + 16, note_offset + 36, site.offset] {
+        let mut corrupt = output.clone();
+        corrupt[offset] ^= 0x40;
+        let corrupt = BinaryImage::parse(corrupt).unwrap();
+        assert!(corrupt.rewrite_locations().is_empty() && corrupt.source_locations.is_empty());
+        assert!(
+            corrupt
+                .warnings
+                .iter()
+                .any(|w| w.contains("rewrite metadata"))
+        );
+        assert!(
+            plan_replacement(
+                &corrupt,
+                &site,
+                &unit,
+                RebuildOptions {
+                    mode: PlacementMode::Relocated,
+                    limits: RebuildLimits::default()
+                },
+                &c
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        plan_replacement(
+            &reopened,
+            &site,
+            &unit,
+            RebuildOptions {
+                mode: PlacementMode::Relocated,
+                limits: RebuildLimits::default()
+            },
+            &c
+        )
+        .is_err()
+    );
+    let body_symbol = reopened
+        .symbols
+        .iter()
+        .find(|s| s.name == "__ale_body_example")
+        .unwrap();
+    assert_eq!(
+        (body_symbol.address, body_symbol.size),
+        (body, plan.summary().body_span.len() as u64)
+    );
+    assert!(
+        reopened
+            .sections
+            .iter()
+            .any(|s| s.name.starts_with(".ale.rodata.") && s.file_size > 0 && !s.executable)
+    );
+    let analysis = reopened
+        .analyze(&Architecture::X86_64, AnalysisLimits::default(), &c)
+        .unwrap();
+    let graph = analysis.call_graph(&c).unwrap();
+    assert!(
+        analysis
+            .functions
+            .iter()
+            .filter(|f| f.address == entry)
+            .flat_map(|f| &f.blocks)
+            .flat_map(|b| &b.edges)
+            .any(|e| e.kind == EdgeKind::Jump && e.target_address == Some(body))
+    );
+    assert!(
+        graph
+            .sites
+            .iter()
+            .any(|s| analysis.functions[s.caller].address == body
+                && s.target_address == Some(helper)
+                && s.callee.is_some())
+    );
+    let call = graph
+        .sites
+        .iter()
+        .find(|s| analysis.functions[s.caller].address == body && s.target_address == Some(helper))
+        .unwrap();
+    assert_eq!(reopened.offset_to_address(call.offset), Some(call.address));
+    assert!(
+        !graph.sites.iter().any(
+            |s| analysis.functions[s.caller].address == entry && s.target_address == Some(body)
+        )
+    );
+    let export = root.0.join("export.elf");
+    fs::write(&export, &output).unwrap();
+    fs::set_permissions(&export, fs::Permissions::from_mode(0o700)).unwrap();
+    let table = [3, 7, 11, 19, 29, 43, 59, 83];
+    let mut observations = String::new();
+    for x in [-100i32, -1, 0, 1, 4, 31, 100] {
+        let i = (x as u32 & 7) as usize;
+        let count = 11 + table[i];
+        let expected = 3 * count + 7 + table[(i + 3) & 7] + x;
+        let arg = x.to_string();
+        let (result, _) = run_owned_args(&export, &[&arg]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).trim(),
+            format!("result={expected} counter={count}")
+        );
+        observations.push_str(&format!(
+            "input={x} {}",
+            String::from_utf8_lossy(&result.stdout)
+        ));
+    }
+    assert_eq!(fs::read(&orig).unwrap(), input);
+    save("calls-runtime.txt", observations.as_bytes());
+    save("calls-original.c", original.as_bytes());
+    save("calls-replacement.c", replacement.as_bytes());
+    save("calls-original.elf", &input);
+    save("calls-replacement.o", &fs::read(object).unwrap());
+    save("calls-export.elf", &output);
+    save("calls-object-readelf.txt", &objdump.stdout);
+}
+
+#[test]
+fn et_exec_self_recursion_calls_new_body() {
+    let root = Fixture::new();
+    let src = root.0.join("recursive-original.c");
+    let orig = root.0.join("recursive-original.elf");
+    let edit = root.0.join("recursive-edit.c");
+    let obj = root.0.join("recursive-edit.o");
+    let source = "__attribute__((noinline)) int example(int x){return x*x+17;} int main(void){return example(4);}\n";
+    let replacement =
+        "int example(int x){if(x<=0)return 4; volatile int v=example(x-1); return v+3;}\n";
+    fs::write(&src, source).unwrap();
+    fs::write(&edit, replacement).unwrap();
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-O1",
+            "-no-pie",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fcf-protection=none",
+            src.to_str().unwrap(),
+            "-o",
+            orig.to_str().unwrap(),
+        ],
+    );
+    run_tool(
+        "/usr/bin/cc",
+        &[
+            "-c",
+            "-O1",
+            "-ffreestanding",
+            "-fno-builtin",
+            "-fno-stack-protector",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fno-jump-tables",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-fpie",
+            "-fno-optimize-sibling-calls",
+            edit.to_str().unwrap(),
+            "-o",
+            obj.to_str().unwrap(),
+        ],
+    );
+    let report = run_tool("/usr/bin/readelf", &["-rW", obj.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&report.stdout).contains("example"));
+    let original = fs::read(&orig).unwrap();
+    let image = BinaryImage::parse(original.clone()).unwrap();
+    let entry = image
+        .symbols
+        .iter()
+        .find(|s| s.name == "example")
+        .unwrap()
+        .address;
+    let site = ReplacementSite::discover(&image, entry).unwrap();
+    let c = AtomicBool::new(false);
+    let unit = RelocatableUnit::parse(
+        &fs::read(&obj).unwrap(),
+        "example",
+        &RebuildLimits::default(),
+        &c,
+    )
+    .unwrap();
+    let plan = plan_replacement(
+        &image,
+        &site,
+        &unit,
+        RebuildOptions {
+            mode: PlacementMode::Relocated,
+            limits: RebuildLimits::default(),
+        },
+        &c,
+    )
+    .unwrap();
+    assert!(
+        plan.summary()
+            .relocations
+            .iter()
+            .any(|r| r.symbol == "example" && r.target_address == plan.summary().body_address)
+    );
+    let output = plan.apply_to(&image).unwrap().bytes().to_vec();
+    let export = root.0.join("recursive-export.elf");
+    fs::write(&export, &output).unwrap();
+    fs::set_permissions(&export, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(run_owned(&orig).0.status.code(), Some(33));
+    assert_eq!(run_owned(&export).0.status.code(), Some(16));
+    assert_eq!(fs::read(&orig).unwrap(), original);
+    save("recursion-original.c", source.as_bytes());
+    save("recursion-edit.c", replacement.as_bytes());
+    save("recursion-original.elf", &original);
+    save("recursion-export.elf", &output);
+    save("recursion-relocations.txt", &report.stdout);
+}
+
+#[test]
+fn et_exec_rejects_bss_dynamic_relocations_and_ambiguous_data() {
+    use ale_systems_core::rebuild::RebuildErrorCode;
+    let root = Fixture::new();
+    let cases = [
+        (
+            "bss",
+            "__attribute__((visibility(\"hidden\"))) int counter;",
+            None,
+            "extern int counter; int example(int x){return counter+x;}",
+            RebuildErrorCode::UnsupportedObject,
+        ),
+        (
+            "dynamic",
+            "#include <stdio.h>\n__attribute__((visibility(\"hidden\"))) int (*counter)(const char*)=puts;",
+            None,
+            "extern int (*counter)(const char*); int example(int x){return (counter!=0)+x;}",
+            RebuildErrorCode::UnsupportedObject,
+        ),
+        (
+            "ambiguous",
+            "static volatile int counter=3; __attribute__((noinline)) int use_first(void){return counter;}",
+            Some(
+                "static volatile int counter=7; __attribute__((noinline)) int use_second(void){return counter;}",
+            ),
+            "extern int counter; int example(int x){return counter+x;}",
+            RebuildErrorCode::AmbiguousSymbol,
+        ),
+    ];
+    for (label, declaration, extra, replacement, expected) in cases {
+        let source = format!(
+            "{declaration}\n__attribute__((noinline)) int example(int x){{return x*x+17;}} int main(void){{return example(3);}}\n"
+        );
+        let orig_c = root.0.join(format!("{label}.c"));
+        let extra_c = root.0.join(format!("{label}-extra.c"));
+        let orig = root.0.join(format!("{label}.elf"));
+        let edit = root.0.join(format!("{label}-edit.c"));
+        let object = root.0.join(format!("{label}.o"));
+        fs::write(&orig_c, &source).unwrap();
+        fs::write(&edit, replacement).unwrap();
+        let mut args = vec![
+            "-O1",
+            "-no-pie",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-unwind-tables",
+            "-fcf-protection=none",
+            orig_c.to_str().unwrap(),
+        ];
+        if let Some(extra) = extra {
+            fs::write(&extra_c, extra).unwrap();
+            args.push(extra_c.to_str().unwrap());
+        }
+        args.extend(["-o", orig.to_str().unwrap()]);
+        run_tool("/usr/bin/cc", &args);
+        run_tool(
+            "/usr/bin/cc",
+            &[
+                "-c",
+                "-O1",
+                "-ffreestanding",
+                "-fno-builtin",
+                "-fno-stack-protector",
+                "-fno-asynchronous-unwind-tables",
+                "-fno-unwind-tables",
+                "-fno-jump-tables",
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-fpie",
+                "-fno-optimize-sibling-calls",
+                edit.to_str().unwrap(),
+                "-o",
+                object.to_str().unwrap(),
+            ],
+        );
+        let input = fs::read(&orig).unwrap();
+        let image = BinaryImage::parse(input.clone()).unwrap();
+        let entry = image
+            .symbols
+            .iter()
+            .find(|s| s.name == "example")
+            .unwrap()
+            .address;
+        let site = ReplacementSite::discover(&image, entry).unwrap();
+        let c = AtomicBool::new(false);
+        let unit = RelocatableUnit::parse(
+            &fs::read(&object).unwrap(),
+            "example",
+            &RebuildLimits::default(),
+            &c,
+        )
+        .unwrap();
+        let result = plan_replacement(
+            &image,
+            &site,
+            &unit,
+            RebuildOptions {
+                mode: PlacementMode::Relocated,
+                limits: RebuildLimits::default(),
+            },
+            &c,
+        );
+        assert_eq!(result.err().unwrap().code, expected, "{label}");
+        assert_eq!(fs::read(&orig).unwrap(), input);
+        let report = run_tool("/usr/bin/readelf", &["-rW", "-sW", orig.to_str().unwrap()]);
+        if label == "dynamic" {
+            let address = image
+                .symbols
+                .iter()
+                .find(|s| s.name == "counter")
+                .unwrap()
+                .address;
+            assert!(String::from_utf8_lossy(&report.stdout).contains(&format!("{address:016x}")));
+        }
+        save(&format!("negative-{label}-source.c"), source.as_bytes());
+        save(&format!("negative-{label}-readelf.txt"), &report.stdout);
+    }
 }
