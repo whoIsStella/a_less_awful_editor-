@@ -10,9 +10,10 @@ open when you switch to binary views. No account or cloud service is required.
 
 ## What you can do
 
-- Browse a selected folder and open its files.
 - Run a local shell in the integrated Terminal panel on Linux.
-- Edit and save UTF-8 text with Unicode navigation, selection, clipboard, and undo/redo.
+- Browse a selected folder and open its files; edit and save UTF-8 text with
+  Unicode navigation, selection, clipboard, and undo/redo.
+- Explore callers and outgoing call sites through **Flow → Calls**.
 - Inspect ELF, PE, and Mach-O files with linked assembly, bytes, symbols, and strings.
 - Explore x86/x86-64 functions and control-flow graphs, and navigate to source when DWARF information is available.
 - Preview instruction or byte edits, undo patches, and export to a new file without overwriting the original.
@@ -54,12 +55,13 @@ Inspection and byte patching work without it.
 - **Ctrl+Shift+O** opens a binary for inspection.
 - **Ctrl+1** returns to your text; **Ctrl+2**, **Ctrl+3**, and **Ctrl+4** show binary overview, assembly, and bytes.
 - **Export copy** writes patched bytes to a new file.
-- **Terminal** starts your shell in the selected folder, or the open file’s parent. Click inside to type; Ctrl+C interrupts and Ctrl+Shift+V pastes.
+- **Terminal** starts your shell in the selected folder or open file’s parent.
+  Run your project's build command explicitly. Ctrl+C interrupts; Ctrl+Shift+V
+  pastes. Click the editor before using shortcuts such as Ctrl+S or Ctrl+Q.
 
 Read the [text editing guide](docs/scratch-editor.md),
 [binary workbench guide](docs/systems-workbench.md), or
-[native function round trip](docs/native-roundtrip.md), and
-[decompiler setup](tools/native-decompiler/README.md) for controls and supported inputs.
+[optional decompiler setup](tools/native-decompiler/README.md) for controls and supported inputs.
 
 ## Practical limits
 
@@ -73,17 +75,16 @@ after files change; open branches stay expanded. Directory listings show up to
 500 entries and exclude symbolic links. The tree limits cached folders, depth
 and visible rows to keep large projects bounded.
 
-The Linux terminal supports a real PTY, window resize, bounded scrollback and
-shell restart. Output is currently monochrome, with whole-screen copy and no
-text selection or full input-method support. It starts in the chosen folder;
-changing the sidebar folder does not move an existing shell. Stop or closing
-the application hangs up the shell and foreground job; detached daemons are
-outside session cleanup. There are no language diagnostics, Git client, debugger,
-or syntax highlighting.
+The Linux terminal has a real PTY, resize, bounded scrollback and restart.
+Output is monochrome; copy captures the screen, with no selection or full IME
+support. Existing shells retain their working directory when the sidebar root
+changes; Restart shell starts in the newly selected folder. Stop sends hangup
+to the shell and foreground group; detached daemons are outside cleanup.
+Language diagnostics, Git integration, debugging and
+syntax highlighting remain unimplemented.
 Binary patches do not repair relocations, signatures, or checksums. Recovered
 pseudocode uses inferred names and types; it is not the original source.
 
-Native recompilation currently uses fixed-size leaf-function placement. Growing
-functions, relocation-aware calls/data, stronger ABI recovery, other targets,
-hardware toolchains and language-design tooling require further implementation.
-See the round-trip guide before editing recovered code.
+Read [the native round-trip guide](docs/native-roundtrip.md). Current replacement
+is limited to named, fixed-size Linux x86-64 ELF leaf functions without relocation
+requirements. Broader rewriting, hardware and language toolchains remain work.

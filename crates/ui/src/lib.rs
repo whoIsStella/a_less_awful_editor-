@@ -3,10 +3,16 @@ mod explorer;
 mod persistence;
 pub mod prompts;
 mod recompiler;
+mod save_trace;
 mod systems;
 mod systems_io;
 mod systems_shell;
 mod terminal;
+
+/// Keep application shortcuts from preempting input to a focused terminal.
+pub fn init_terminal_keymap(cx: &mut gpui::App) {
+    terminal::init_keymap(cx);
+}
 
 use ale_editor_core::TextSnapshot;
 use ale_editor_view::EditorView;
@@ -15,6 +21,7 @@ use gpui::{
     Render, Window, actions, div, prelude::*, px, rgb,
 };
 use persistence::{DiskVersion, Loaded, SaveError};
+use save_trace::{SaveOperationId, SaveTrace, SaveTraceEvent};
 use std::path::PathBuf;
 use systems::{Lens, Workbench};
 use systems_shell::BinaryIntent;
@@ -93,6 +100,11 @@ pub struct AppShell {
     replacement_target: Option<ReplacementTarget>,
     busy: bool,
     pending: Option<Intent>,
+    save_trace: SaveTrace,
+    active_save: Option<SaveOperationId>,
+    save_observation: u64,
+    #[cfg(test)]
+    fail_next_directory_sync: bool,
     status: String,
     workbench: Option<Entity<Workbench>>,
     systems_active: bool,
@@ -134,6 +146,11 @@ impl AppShell {
             replacement_target: None,
             busy: false,
             pending: None,
+            save_trace: SaveTrace::from_environment(),
+            active_save: None,
+            save_observation: 0,
+            #[cfg(test)]
+            fail_next_directory_sync: false,
             status: "Untitled - not saved to disk".into(),
             workbench: None,
             systems_active: false,
@@ -151,7 +168,20 @@ impl AppShell {
         cx.notify();
     }
 
+    fn trace_save(&mut self, cx: &Context<Self>, event: SaveTraceEvent) {
+        if let Some(operation) = self.active_save {
+            self.save_trace
+                .record(operation, self.editor.read(cx).content_revision(), event);
+        }
+    }
+
+    fn save_callback_is_current(&self, operation: Option<SaveOperationId>) -> bool {
+        operation.is_none() || self.active_save == operation
+    }
+
     fn cancel(&mut self, message: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.trace_save(cx, SaveTraceEvent::Cancelled);
+        self.active_save = None;
         self.pending = None;
         self.binary_pending = None;
         self.close_text_revision = None;
@@ -160,6 +190,7 @@ impl AppShell {
     }
 
     fn failure(&mut self, message: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.trace_save(cx, SaveTraceEvent::Failed);
         self.panel = Panel::Output;
         self.cancel(message, window, cx);
     }
@@ -229,11 +260,7 @@ impl AppShell {
                 this.busy = false;
                 match result {
                     Ok(Ok(Some(paths))) if paths.len() == 1 => {
-                        let path = paths[0].clone();
-                        this.explorer_tree.reset(path.clone());
-                        this.explorer_selected = None;
-                        this.explorer_visible = true;
-                        this.load_folder(path, window, cx);
+                        this.select_folder(paths[0].clone(), window, cx);
                     }
                     Ok(Ok(_)) => this.cancel("Folder selection cancelled", window, cx),
                     error => this.failure(format!("Folder dialog failed: {error:?}"), window, cx),
@@ -241,6 +268,18 @@ impl AppShell {
             });
         })
         .detach();
+    }
+
+    fn select_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, _| {
+                terminal.set_restart_directory(path.clone())
+            });
+        }
+        self.explorer_tree.reset(path.clone());
+        self.explorer_selected = None;
+        self.explorer_visible = true;
+        self.load_folder(path, window, cx);
     }
 
     fn load_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -352,7 +391,7 @@ impl AppShell {
             Intent::RecoveredC(text, target) => {
                 if !self.workbench.as_ref().is_some_and(|w| {
                     w.entity_id() == target.workbench
-                        && w.read(cx).snapshot().1 == target.binary_revision
+                        && w.read(cx).target_epoch() == target.binary_revision
                 }) {
                     self.cancel(
                         "Binary changed; decompile the current snapshot again. Text retained.",
@@ -406,9 +445,14 @@ impl AppShell {
             return;
         }
         self.busy = true;
+        self.active_save = Some(
+            self.save_trace
+                .begin(self.editor.read(cx).content_revision()),
+        );
         if !save_as && let Some(path) = self.path.clone() {
             let snapshot = self.editor.update(cx, |editor, _| editor.save_snapshot());
-            self.write_snapshot(path, snapshot, self.disk.clone(), window, cx);
+            self.trace_save(cx, SaveTraceEvent::SnapshotCaptured);
+            self.write_snapshot(path, snapshot, self.disk.clone(), None, window, cx);
             return;
         }
         let directory = self
@@ -430,14 +474,19 @@ impl AppShell {
         let picker = cx.prompt_for_new_path(directory, Some(name));
         self.status = "Choose a save destination...".into();
         cx.notify();
+        let operation = self.active_save;
         cx.spawn_in(window, async move |this, cx| {
             let result = picker.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if !this.save_callback_is_current(operation) {
+                    return;
+                }
                 match result {
                     Ok(Ok(Some(path))) => {
                         let snapshot = this.editor.update(cx, |editor, _| editor.save_snapshot());
                         // Always create-only first, even if a platform picker already asked.
-                        this.write_snapshot(path, snapshot, None, window, cx);
+                        this.trace_save(cx, SaveTraceEvent::SnapshotCaptured);
+                        this.write_snapshot(path, snapshot, None, None, window, cx);
                     }
                     Ok(Ok(None)) => this.cancel("Save cancelled - document retained", window, cx),
                     error => {
@@ -454,21 +503,40 @@ impl AppShell {
         path: PathBuf,
         snapshot: TextSnapshot,
         expected: Option<DiskVersion>,
+        observation: Option<u64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.trace_save(cx, SaveTraceEvent::WriteStarted { observation });
         self.status = "Saving snapshot...".into();
         cx.notify();
         let worker_path = path.clone();
         let worker_snapshot = snapshot.clone();
+        let operation = self.active_save;
+        #[cfg(test)]
+        let fail_sync = std::mem::take(&mut self.fail_next_directory_sync);
         let work = cx.background_executor().spawn(async move {
+            #[cfg(test)]
+            if fail_sync {
+                return persistence::save_with_directory_sync(
+                    &worker_path,
+                    &worker_snapshot,
+                    expected.as_ref(),
+                    || {},
+                    |_| Err(std::io::Error::other("injected directory sync failure")),
+                );
+            }
             persistence::save(&worker_path, &worker_snapshot, expected.as_ref())
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if !this.save_callback_is_current(operation) {
+                    return;
+                }
                 match result {
                     Ok(version) => {
+                        this.trace_save(cx, SaveTraceEvent::WriteAcknowledged);
                         this.path = Some(path);
                         this.disk = Some(version);
                         this.editor
@@ -480,6 +548,8 @@ impl AppShell {
                         };
                         this.finish(message, window, cx);
                         if let Some(intent) = this.pending.take() {
+                            this.trace_save(cx, SaveTraceEvent::PendingIntentApplied);
+                            this.active_save = None;
                             match intent {
                                 Intent::Open(loaded) => {
                                     // A save may have changed the very file being opened.
@@ -494,12 +564,16 @@ impl AppShell {
                                 }
                             }
                         }
+                        this.active_save = None;
                     }
                     Err(SaveError::Failed(error)) => {
                         this.failure(format!("Save failed: {error}"), window, cx)
                     }
                     Err(SaveError::Conflict(observed)) => {
-                        this.confirm_overwrite(path, snapshot, observed, window, cx)
+                        this.save_observation = this.save_observation.saturating_add(1);
+                        let observation = this.save_observation;
+                        this.trace_save(cx, SaveTraceEvent::ConflictObserved { observation });
+                        this.confirm_overwrite(path, snapshot, observed, observation, window, cx)
                     }
                 }
             });
@@ -545,17 +619,26 @@ impl AppShell {
         path: PathBuf,
         snapshot: TextSnapshot,
         observed: Option<DiskVersion>,
+        observation: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.trace_save(cx, SaveTraceEvent::PromptPresented { observation });
         let answer = window.prompt(PromptLevel::Warning, "Destination exists or changed outside the editor",
             Some(&format!("{}\nOverwrite with the captured buffer snapshot? Cancel keeps your document and the disk file.", path.display())),
             &[PromptButton::Cancel("Cancel".into()), PromptButton::Other("Overwrite".into())], cx);
+        let operation = self.active_save;
         cx.spawn_in(window, async move |this, cx| {
             let answer = answer.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if !this.save_callback_is_current(operation) {
+                    return;
+                }
+                if let Ok(index) = answer {
+                    this.trace_save(cx, SaveTraceEvent::ResponseSelected { index, observation });
+                }
                 if matches!(answer, Ok(1)) {
-                    this.write_snapshot(path, snapshot, observed, window, cx);
+                    this.write_snapshot(path, snapshot, observed, Some(observation), window, cx);
                 } else {
                     this.cancel("Save cancelled - document retained", window, cx);
                 }
@@ -580,7 +663,7 @@ impl AppShell {
             return;
         }
         if workbench.entity_id() != target.workbench
-            || workbench.read(cx).snapshot().1 != target.binary_revision
+            || workbench.read(cx).target_epoch() != target.binary_revision
         {
             self.status="The target binary changed. Decompile its current snapshot and edit that recovered C.".into();
             cx.notify();
@@ -1126,6 +1209,104 @@ mod tests {
         })
     }
 
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn folder_selection_and_existing_terminal_keep_explicit_cwd(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first project λ");
+        let second = root.path().join("second project λ");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.select_folder(first.clone(), window, cx);
+                shell.show_terminal(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let terminal = cx.update(|_, cx| shell.read(cx).terminal.clone().unwrap());
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.select_folder(second.clone(), window, cx);
+            })
+        });
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, _| {
+                terminal.test_send(b"pwd > ../before.txt\r")
+            })
+        });
+        let wait_output = |name: &str| {
+            let path = root.path().join(name);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if let Ok(output) = std::fs::read_to_string(&path)
+                    && !output.trim().is_empty()
+                {
+                    return output.trim().to_owned();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("shell did not write {}", path.display());
+        };
+        assert_eq!(wait_output("before.txt"), first.to_str().unwrap());
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, _| {
+                terminal.test_restart();
+                terminal.test_send(b"pwd > ../after.txt\r");
+            })
+        });
+        assert_eq!(wait_output("after.txt"), second.to_str().unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn terminal_focus_does_not_save_or_quit_editor_on_control_keys(cx: &mut TestAppContext) {
+        use gpui::KeyBinding;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scratch.txt");
+        std::fs::write(&path, b"original\n").unwrap();
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-s", Save, None),
+                KeyBinding::new("ctrl-q", Quit, None),
+            ]);
+            init_terminal_keymap(cx);
+        });
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.simulate_input("local edit ");
+        let dirty = contents(&shell, cx);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_terminal(window, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-s ctrl-q a b c");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"original\n");
+        assert_eq!(contents(&shell, cx), dirty);
+        assert!(!cx.has_pending_prompt());
+        // Switching back to the editor must restore the normal Save binding.
+        cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .editor
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window)
+        });
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(path).unwrap(), dirty.0);
+        assert!(!contents(&shell, cx).1);
+    }
+
     #[gpui::test]
     fn save_as_cancel_failure_success_and_undo_dirty(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1195,7 +1376,14 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_new_path_selection(|_| None);
         cx.run_until_parked();
-        assert_eq!(contents(&shell, cx).0, b"keep me");
+        assert_eq!(contents(&shell, cx), (b"keep me".to_vec(), true));
+        cx.update(|_, cx| {
+            let state = shell.read(cx);
+            assert!(state.pending.is_none());
+            assert!(state.binary_pending.is_none());
+            assert!(state.close_text_revision.is_none());
+            assert!(state.close_binary_revision.is_none());
+        });
         replace(cx);
         cx.simulate_prompt_answer("Save");
         cx.run_until_parked();
@@ -1290,7 +1478,7 @@ mod tests {
                 shell.pending = Some(Intent::Close);
                 shell.busy = true;
                 let snapshot = shell.editor.update(cx, |editor, _| editor.save_snapshot());
-                shell.write_snapshot(path.clone(), snapshot, None, window, cx);
+                shell.write_snapshot(path.clone(), snapshot, None, None, window, cx);
                 shell.editor.update(cx, |editor, cx| {
                     editor.replace_text_in_range(None, " newer", window, cx)
                 });
@@ -1337,6 +1525,343 @@ mod tests {
         assert_eq!(contents(&shell, cx), dirty);
     }
 
+    #[gpui::test]
+    fn save_trace_preserves_conflict_cancel_outcome(cx: &mut TestAppContext) {
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("scratch.txt");
+            let trace_path = dir.path().join("events.jsonl");
+            std::fs::write(&path, "original").unwrap();
+            let (shell, cx) = cx.add_window_view(AppShell::new);
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.save_trace = if enabled {
+                        SaveTrace::with_path(trace_path.clone(), 4096, 256)
+                    } else {
+                        SaveTrace::disabled()
+                    };
+                    shell.apply_intent(
+                        Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                        window,
+                        cx,
+                    );
+                });
+            });
+            cx.simulate_input("private-payload");
+            let dirty = contents(&shell, cx);
+            std::fs::write(&path, "external").unwrap();
+            cx.dispatch_action(Save);
+            cx.run_until_parked();
+            cx.simulate_prompt_answer("Cancel");
+            cx.run_until_parked();
+            assert_eq!(std::fs::read(&path).unwrap(), b"external");
+            assert_eq!(contents(&shell, cx), dirty);
+            let trace = cx.update(|_, cx| {
+                shell.update(cx, |shell, _| {
+                    std::mem::replace(&mut shell.save_trace, SaveTrace::disabled())
+                })
+            });
+            assert!(trace.finish_for_test());
+            if enabled {
+                let text = std::fs::read_to_string(trace_path).unwrap();
+                assert!(!text.contains("private-payload"));
+                assert!(!text.contains("scratch.txt"));
+                let rows: Vec<serde_json::Value> = text
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                let kinds: Vec<_> = rows
+                    .iter()
+                    .filter_map(|row| row["event"]["kind"].as_str())
+                    .collect();
+                assert_eq!(
+                    kinds,
+                    [
+                        "requested",
+                        "snapshot_captured",
+                        "write_started",
+                        "conflict_observed",
+                        "prompt_presented",
+                        "response_selected",
+                        "cancelled"
+                    ]
+                );
+                assert_eq!(
+                    rows[3]["event"]["observation"],
+                    rows[5]["event"]["observation"]
+                );
+                assert_eq!(rows.last().unwrap()["complete"], true);
+            } else {
+                assert!(!trace_path.exists());
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn stale_overwrite_response_cannot_change_new_save(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.simulate_input("local");
+        let dirty = contents(&shell, cx);
+        std::fs::write(&path, "external").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        let newer = cx.update(|_, cx| {
+            shell.update(cx, |shell, cx| {
+                let id = shell
+                    .save_trace
+                    .begin(shell.editor.read(cx).content_revision());
+                shell.active_save = Some(id);
+                id
+            })
+        });
+        cx.simulate_prompt_answer("Overwrite");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"external");
+        assert_eq!(contents(&shell, cx), dirty);
+        cx.update(|_, cx| {
+            assert_eq!(shell.read(cx).active_save, Some(newer));
+        });
+    }
+
+    #[gpui::test]
+    fn directory_sync_failure_does_not_complete_pending_close(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+                shell.fail_next_directory_sync = true;
+            });
+        });
+        cx.simulate_input("local");
+        let captured = contents(&shell, cx);
+        assert!(captured.1);
+        cx.dispatch_action(Quit);
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Save");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), captured.0);
+        assert_eq!(contents(&shell, cx), captured);
+        cx.update(|_, cx| {
+            let shell = shell.read(cx);
+            assert!(shell.status.contains("File replaced"));
+            assert!(shell.status.contains("Durability is uncertain"));
+            assert!(!shell.busy);
+            assert!(shell.pending.is_none());
+            assert_eq!(shell.path.as_deref(), Some(path.as_path()));
+        });
+    }
+
+    #[gpui::test]
+    fn explicit_overwrite_is_bound_to_observed_version(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.simulate_input("local");
+        let dirty = contents(&shell, cx);
+        std::fs::write(&path, "external one").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        std::fs::write(&path, "external two").unwrap();
+        cx.simulate_prompt_answer("Overwrite");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"external two");
+        assert_eq!(contents(&shell, cx), dirty);
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Overwrite");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), dirty.0);
+        assert!(!contents(&shell, cx).1);
+    }
+
+    #[gpui::test]
+    fn typing_while_conflict_waits_keeps_newer_revision_dirty(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.simulate_input("local");
+        let saved_snapshot = contents(&shell, cx).0;
+        std::fs::write(&path, "external").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.update(|window, cx| {
+            let editor = shell.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_in_range(Some(0..0), "newer", window, cx);
+            });
+        });
+        let newer = contents(&shell, cx);
+        assert_ne!(newer.0, saved_snapshot);
+        cx.simulate_prompt_answer("Overwrite");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), saved_snapshot);
+        assert_eq!(contents(&shell, cx), newer);
+        assert!(newer.1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn conflict_double_response_does_not_write_twice(cx: &mut TestAppContext) {
+        cx.update(prompts::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        let trace_path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.save_trace = SaveTrace::with_path(trace_path.clone(), 4096, 256);
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.simulate_input("local");
+        let dirty = contents(&shell, cx);
+        std::fs::write(&path, "external").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        // The real prompt closes after Escape; repeat that key instead of
+        // inventing a second response to an already dismissed prompt.
+        cx.simulate_keystrokes("escape escape");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"external");
+        assert_eq!(contents(&shell, cx), dirty);
+        let trace = cx.update(|_, cx| {
+            shell.update(cx, |shell, _| {
+                std::mem::replace(&mut shell.save_trace, SaveTrace::disabled())
+            })
+        });
+        assert!(trace.finish_for_test());
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(trace_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let kinds: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row["event"]["kind"].as_str())
+            .collect();
+        let cancelled = kinds.iter().position(|kind| *kind == "cancelled").unwrap();
+        assert!(!kinds[cancelled + 1..].contains(&"write_started"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn conflict_prompt_defaults_to_cancel_on_enter(cx: &mut TestAppContext) {
+        cx.update(prompts::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.simulate_input("local");
+        let dirty = contents(&shell, cx);
+        std::fs::write(&path, "external one").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(shell.read(cx).busy));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"external one");
+        assert_eq!(contents(&shell, cx), dirty);
+        cx.update(|_, cx| {
+            let state = shell.read(cx);
+            assert!(!state.busy);
+            assert!(state.pending.is_none());
+            assert!(state.binary_pending.is_none());
+            assert_eq!(state.path.as_deref(), Some(path.as_path()));
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn cancelled_conflict_cannot_authorize_later_save(cx: &mut TestAppContext) {
+        cx.update(prompts::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.txt");
+        std::fs::write(&path, "original").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_intent(
+                    Intent::Open(Box::new(persistence::load(&path).unwrap())),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.simulate_input("local");
+        let dirty = contents(&shell, cx);
+        std::fs::write(&path, "external one").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        std::fs::write(&path, "external two").unwrap();
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(shell.read(cx).busy));
+        assert_eq!(std::fs::read(&path).unwrap(), b"external two");
+        assert_eq!(contents(&shell, cx), dirty);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&path).unwrap(), b"external two");
+        assert_eq!(contents(&shell, cx), dirty);
+    }
+
     #[cfg(target_os = "linux")]
     #[gpui::test]
     fn linux_confirmation_escape_cancels_and_restores_input_focus(cx: &mut TestAppContext) {
@@ -1357,8 +1882,17 @@ mod tests {
     #[gpui::test]
     fn recovered_c_keeps_existing_text_on_cancel_and_uses_text_lifecycle(cx: &mut TestAppContext) {
         let (_dir, path, image, site) = crate::recompiler::tests::fixture();
+        let text_dir = tempfile::tempdir().unwrap();
+        let text_path = text_dir.path().join("existing.c");
+        let recovered_path = text_dir.path().join("recovered.c");
         let (shell, cx) = cx.add_window_view(AppShell::new);
-        cx.simulate_input("keep my unsaved source");
+        cx.simulate_input("named source");
+        cx.dispatch_action(SaveAs);
+        cx.simulate_new_path_selection(|_| Some(text_path.clone()));
+        cx.run_until_parked();
+        cx.simulate_input(" local edit");
+        let dirty = contents(&shell, cx);
+        std::fs::write(&text_path, "external source").unwrap();
         let target = cx.update(|_, cx| {
             shell.update(cx, |shell, cx| {
                 let workbench = cx.new(|cx| Workbench::new(path, image, cx));
@@ -1384,7 +1918,32 @@ mod tests {
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
-        assert_eq!(contents(&shell, cx).0, b"keep my unsaved source");
+        assert_eq!(contents(&shell, cx), dirty);
+        assert_eq!(std::fs::read(&text_path).unwrap(), b"external source");
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.request_replace(
+                    Intent::RecoveredC(recovered.into(), target.clone()),
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.simulate_prompt_answer("Save");
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(contents(&shell, cx), dirty);
+        assert_eq!(std::fs::read(&text_path).unwrap(), b"external source");
+        cx.update(|_, cx| {
+            let state = shell.read(cx);
+            assert!(state.pending.is_none());
+            assert!(state.binary_pending.is_none());
+            assert!(state.close_text_revision.is_none());
+            assert!(state.close_binary_revision.is_none());
+            assert!(state.workbench.is_some());
+        });
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
                 shell.request_replace(Intent::RecoveredC(recovered.into(), target), window, cx)
@@ -1393,6 +1952,14 @@ mod tests {
         cx.simulate_prompt_answer("Discard");
         cx.run_until_parked();
         assert_eq!(contents(&shell, cx).0, recovered.as_bytes());
+        cx.dispatch_action(SaveAs);
+        cx.simulate_new_path_selection(|_| Some(recovered_path.clone()));
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read(&recovered_path).unwrap(),
+            recovered.as_bytes()
+        );
+        assert_eq!(std::fs::read(&text_path).unwrap(), b"external source");
         cx.simulate_input(" ");
         cx.dispatch_action(Close);
         assert!(cx.has_pending_prompt());

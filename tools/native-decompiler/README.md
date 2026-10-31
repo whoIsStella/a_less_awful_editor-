@@ -25,6 +25,11 @@ packages or use sudo. Keep the generated cache available at the configured path.
 The build verifies the downloaded sources before compilation. The pinned
 upstream revision is `c4273522017788fb67c30058ffd5bbdf291fcc40` (Apache-2.0).
 
+The repository's `scripts/native-worker` adapter uses the absolute cache
+directory in `ALE_NATIVE_CACHE`. If unset, it uses `ale-native-decompiler` under
+`XDG_CACHE_HOME`, or under `~/.cache` when `XDG_CACHE_HOME` is unset. Build the
+worker with `--work-dir` pointing to the same directory before using the adapter.
+
 Open a binary with Inspect, choose a recovered function, select Pseudocode, then
 Decompile. Mapped tokens select the same file location as Assembly and Bytes.
 Copy code copies the complete result. Pseudocode is recovered, with inferred
@@ -40,7 +45,8 @@ names/types; it is not the original source. Worker diagnostics remain visible.
 - Requests time out after 20 seconds. Diagnostic messages explain failed or unsupported requests.
 - Cancel, closing the binary, patching, or selecting another function clears the previous result. You can run Decompile again for the new selection.
 - The worker runs with resource limits, but remains a trusted executable. Only configure a worker you trust.
-- Pseudocode is limited to 1 MiB / 100,000 tokens; native output to 16 MiB and
-  stderr to 64 KiB. Display pages contain up to 32 rows of at most 256 UTF-8
+- Pseudocode is limited to 1 MiB and 65,536 tokens. Native XML and complete
+  adapter response frames are limited to 8 MiB; the editor limits worker stderr
+  to 64 KiB. Display pages contain up to 32 rows of at most 256 UTF-8
   bytes each. Continuation markers identify wrapped lines; Copy code retains
   the original text and line breaks.

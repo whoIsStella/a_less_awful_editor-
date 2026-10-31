@@ -13,23 +13,30 @@ editor. This path currently requires Linux and x86-64 ELF output.
 
 ## Round trip
 
-1. **Inspect** an ELF executable or shared object. Select the function in the
-   function list and open **Pseudocode**, then **Decompile**.
-2. Choose **Edit recovered C**. The recovered text opens as a separate text
+1. Use **Open Folder** to browse your project and open its source. Save source
+   edits, then open **Terminal** and run your project's build command. Folder
+   browsing does not build files automatically.
+2. **Inspect** the resulting ELF executable or shared object. Select a function
+   and use **Flow → Calls** to explore its callers and outgoing calls. A call
+   location opens its instruction in **Assembly**; **Bytes** shows its bytes.
+3. Select the function to replace, open **Pseudocode**, then **Decompile**.
+4. Choose **Edit recovered C**. The recovered text opens as a separate text
    document. Existing unsaved text gets the normal Save/Discard/Cancel prompt.
-3. Edit the function. Preserve its name and review the original calling
+5. Edit the function. Preserve its name and review the original calling
    convention, parameter types, return type and effects. The compiler accepts
    basic Ghidra scalar type aliases, but does not recover or verify the ABI.
    Use Save As to retain the recovered/edited C separately.
-4. Click **Compile C**. The result appears as an assembly/byte preview, not an
+6. Click **Compile C**. The result appears as an assembly/byte preview, not an
    immediate binary mutation. Compiler diagnostics explain failed builds.
    **Cancel compile** stops an active compilation.
-5. Review the instructions and **Apply patch**. The edit is applied in memory;
-   binary undo/redo remains available. Changing source invalidates its preview.
-6. **Export copy** to a new destination. A compiled native replacement exports
+7. Review the instructions and **Apply patch**. The edit is applied in memory;
+   binary undo/redo remains available. Changing source invalidates its preview;
+   compile again after an edit. After a binary patch, undo or redo, decompile
+   the current binary and choose **Edit recovered C** again before compiling.
+8. **Export copy** to a new destination. A compiled native replacement exports
    with owner-only read/write/execute permissions (0700). The editor does not
    run the result. Existing destinations and the original binary are not replaced.
-7. Reopen and decompile the exported/current binary to inspect the changed code.
+9. Reopen and decompile the exported/current binary to inspect the changed code.
    After applying a patch, recover from the new binary snapshot before starting
    another replacement. Source and binary documents retain their own save state.
 

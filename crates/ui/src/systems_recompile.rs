@@ -40,7 +40,7 @@ impl Workbench {
         let image = self.image.clone();
         let entry = result.entry;
         let text = result.text.clone();
-        let revision = self.revision;
+        let revision = self.target_epoch;
         self.busy = true;
         let work = cx
             .background_executor()
@@ -49,7 +49,7 @@ impl Workbench {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
-                if this.revision != revision {
+                if this.target_epoch != revision {
                     return;
                 }
                 match result {
@@ -124,6 +124,81 @@ impl Workbench {
 mod tests {
     use super::*;
     use gpui::{EntityInputHandler, TestAppContext};
+    #[gpui::test]
+    fn source_undo_redo_and_entity_switch_invalidate_only_the_right_preview(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, _path, image, site) = crate::recompiler::tests::fixture();
+        let before = image.bytes().to_vec();
+        let (source, cx) =
+            cx.add_window_view(|_, cx| EditorView::new("int roundtrip(int x){return x+7;}", cx));
+        cx.update(|window, cx| source.read(cx).focus_handle(cx).focus(window));
+        let workbench =
+            cx.update(|_, cx| cx.new(|cx| Workbench::new(PathBuf::from("fixture.elf"), image, cx)));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            workbench.update(cx, |view, cx| {
+                view.compile_replacement(site.clone(), source.clone(), cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| workbench.read(cx).preview.is_some()));
+        cx.simulate_input(" ");
+        assert!(cx.update(|_, cx| source.read(cx).text().starts_with(' ')));
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(
+            cx.update(|_, cx| source.read(cx).text()),
+            "int roundtrip(int x){return x+7;}"
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            workbench.update(cx, |view, cx| {
+                view.apply_patch(cx);
+                assert!(view.preview.is_none());
+                assert_eq!(view.image.bytes(), before);
+            })
+        });
+        cx.update(|_, cx| {
+            workbench.update(cx, |view, cx| {
+                view.compile_replacement(site.clone(), source.clone(), cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| workbench.read(cx).preview.is_some()));
+        cx.simulate_keystrokes("ctrl-y");
+        assert!(cx.update(|_, cx| source.read(cx).text().starts_with(' ')));
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| workbench.read(cx).preview.is_none()));
+        let other = cx
+            .update(|_, cx| cx.new(|cx| EditorView::new("int roundtrip(int x){return x+7;}", cx)));
+        cx.update(|_, cx| {
+            workbench.update(cx, |view, cx| {
+                view.compile_replacement(site, other.clone(), cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| workbench.read(cx).preview.is_some()));
+        cx.update(|window, cx| {
+            source.update(cx, |source, cx| {
+                source.replace_text_in_range(Some(0..0), " ", window, cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| workbench.read(cx).preview.is_some()));
+        cx.update(|window, cx| {
+            other.update(cx, |source, cx| {
+                source.replace_text_in_range(Some(0..0), " ", window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            workbench.update(cx, |view, cx| {
+                view.apply_patch(cx);
+                assert!(view.preview.is_none());
+                assert_eq!(view.image.bytes(), before);
+            })
+        });
+    }
     #[gpui::test]
     fn edited_source_cannot_apply_stale_compilation(cx: &mut TestAppContext) {
         let (_dir, _path, image, site) = crate::recompiler::tests::fixture();

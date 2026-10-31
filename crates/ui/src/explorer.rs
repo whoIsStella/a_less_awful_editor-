@@ -268,17 +268,17 @@ impl Tree {
         } else {
             folder.note.as_deref()
         };
-        if rows.len() < MAX_VISIBLE_ROWS {
-            if let Some(note) = note {
-                rows.push(Row {
-                    path: path.to_path_buf(),
-                    name: note.into(),
-                    directory: false,
-                    expanded: false,
-                    depth: depth + 1,
-                    note: true,
-                });
-            }
+        if rows.len() < MAX_VISIBLE_ROWS
+            && let Some(note) = note
+        {
+            rows.push(Row {
+                path: path.to_path_buf(),
+                name: note.into(),
+                directory: false,
+                expanded: false,
+                depth: depth + 1,
+                note: true,
+            });
         }
     }
 }

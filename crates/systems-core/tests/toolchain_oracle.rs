@@ -446,3 +446,75 @@ fn rip_relative_data_references_match_linked_objdump_targets() {
     assert_eq!(indirect.resolution, EdgeResolution::Indirect);
     assert_eq!(indirect.target_address, None);
 }
+
+#[test]
+fn call_relationships_match_linked_direct_call_sites() {
+    use ale_systems_core::{AnalysisLimits, EdgeResolution};
+    use std::sync::atomic::AtomicBool;
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        eprintln!("SKIP: call-site oracle requires Linux x86-64");
+        return;
+    }
+    if !optional_tool_available("cc") || !optional_tool_available("objdump") {
+        return;
+    }
+    let directory = FixtureDirectory::new();
+    let source = directory.0.join("calls.S");
+    let executable = directory.0.join("calls.elf");
+    fs::write(&source, ".text\n.globl probe\n.type probe,@function\nprobe:\n call helper\n call helper\n call *slot(%rip)\n ret\n.size probe,.-probe\n.type helper,@function\nhelper:\n ret\n.size helper,.-helper\n.data\nslot: .quad helper\n.section .note.GNU-stack,\"\",@progbits\n").unwrap();
+    successful_output(
+        Command::new("cc")
+            .args(["-nostdlib", "-no-pie", "-Wl,-e,probe"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable),
+    );
+    let image = BinaryImage::parse(fs::read(&executable).unwrap()).unwrap();
+    let analysis = image
+        .analyze(
+            &Architecture::X86_64,
+            AnalysisLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let graph = analysis.call_graph(&AtomicBool::new(false)).unwrap();
+    let caller = analysis
+        .functions
+        .iter()
+        .position(|f| f.name == "probe")
+        .unwrap();
+    let callee = analysis
+        .functions
+        .iter()
+        .position(|f| f.name == "helper")
+        .unwrap();
+    let listing = output_text(
+        Command::new("objdump")
+            .args(["-d", "-Mintel", "--disassemble=probe"])
+            .arg(&executable),
+    );
+    let calls: Vec<_> = objdump_instructions(&listing)
+        .into_iter()
+        .filter(|i| i.text.starts_with("call "))
+        .collect();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(graph.outgoing[caller].len(), 3);
+    for (index, instruction) in graph.outgoing[caller].iter().zip(&calls) {
+        let site = &graph.sites[*index];
+        assert_eq!(site.address, instruction.address);
+        assert_eq!(
+            Some(site.offset),
+            image.address_to_offset(instruction.address)
+        );
+        if instruction.text.contains("<helper>") {
+            let target = hex(instruction.text.split_whitespace().nth(1).unwrap());
+            assert_eq!(site.target_address, Some(target));
+            assert_eq!(site.callee, Some(callee));
+            assert_eq!(site.resolution, EdgeResolution::Resolved);
+        } else {
+            assert_eq!(site.callee, None);
+            assert_eq!(site.resolution, EdgeResolution::Indirect);
+        }
+    }
+    assert_eq!(graph.incoming[callee].len(), 2);
+}

@@ -94,6 +94,7 @@ pub(crate) struct Workbench {
     message: String,
     preview: Option<(usize, Vec<u8>, u64)>,
     revision: u64,
+    target_epoch: u64,
     next_revision: u64,
     saved_revision: u64,
     undo: Vec<(u64, Arc<BinaryImage>)>,
@@ -181,6 +182,7 @@ impl Workbench {
                 .into(),
             preview: None,
             revision: 0,
+            target_epoch: 0,
             next_revision: 1,
             saved_revision: 0,
             undo: Vec::new(),
@@ -220,6 +222,9 @@ impl Workbench {
     }
     pub fn snapshot(&self) -> (Arc<BinaryImage>, u64) {
         (self.image.clone(), self.revision)
+    }
+    pub(crate) fn target_epoch(&self) -> u64 {
+        self.target_epoch
     }
     pub fn mark_exported(&mut self, revision: u64, cx: &mut Context<Self>) {
         self.saved_revision = revision;
@@ -334,6 +339,7 @@ impl Workbench {
                 self.redo.push(current);
             }
             self.revision = revision;
+            self.target_epoch = self.target_epoch.wrapping_add(1);
             self.image = image;
             self.preview = None;
             self.decode();
@@ -506,13 +512,13 @@ impl Workbench {
         if self.busy {
             return;
         }
-        if let Some((source, revision)) = &self.compilation.source {
-            if source.read(cx).content_revision() != *revision {
-                self.invalidate_compilation();
-                self.message = "C source changed; compile a new preview before applying.".into();
-                cx.notify();
-                return;
-            }
+        if let Some((source, revision)) = &self.compilation.source
+            && source.read(cx).content_revision() != *revision
+        {
+            self.invalidate_compilation();
+            self.message = "C source changed; compile a new preview before applying.".into();
+            cx.notify();
+            return;
         }
         let Some((offset, bytes, revision)) = self.preview.take() else {
             return;
@@ -545,7 +551,7 @@ impl Workbench {
                     this.executable_export |= native_replacement;
                     this.undo.push((this.revision,this.image.clone()));
                     while this.undo.len() > 32 || this.undo.iter().map(|(_,image)|image.bytes().len()).sum::<usize>() > 128*1024*1024 { this.undo.remove(0); }
-                    this.redo.clear(); this.image = Arc::new(image); this.revision = this.next_revision; this.next_revision += 1;
+                    this.redo.clear(); this.image = Arc::new(image); this.revision = this.next_revision; this.next_revision += 1; this.target_epoch = this.target_epoch.wrapping_add(1);
                     this.decode(); this.refresh_entropy(cx); this.refresh_analysis(cx); this.message = "Patch applied in memory. Export copy to write a new file; source mappings describe the original build.".into();
                 }
                 Err(error) => this.message = format!("Patch rejected; buffer retained: {error}"),

@@ -28,6 +28,7 @@ fn main() {
             KeyBinding::new(&format!("{modifier}-w"), Close, None),
             KeyBinding::new(&format!("{modifier}-q"), Quit, None),
         ]);
+        ale_ui::init_terminal_keymap(cx);
         cx.set_menus(vec![Menu {
             name: "File".into(),
             items: vec![

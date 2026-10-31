@@ -1,6 +1,7 @@
 # Single-file editor
 
-The editor starts with an empty **Untitled** buffer. Nothing is written until
+The editor holds one text document at a time and starts with an empty **Untitled**
+buffer. Nothing is written until
 Save or Save As succeeds. A `*` in the document label and native title indicates
 unsaved edits. The label shows the full selected path; the title identifies the open document.
 
@@ -18,8 +19,14 @@ Symbolic links are skipped. Limits are 500 entries per directory, 128 cached
 folders, 32 levels of nesting and 2,500 visible rows. Collapse folders and refresh
 to free the folder cache when its limit is reached.
 
-The editor does not include an integrated terminal, language diagnostics,
-Git client, or debugger.
+The Terminal panel provides a Linux PTY shell with interrupt, paste, resize,
+stop and restart. Open Folder only browses files: run your build command
+explicitly in the terminal. Language diagnostics, a Git client and a debugger
+remain unimplemented.
+Selecting a different folder leaves the current shell in its existing working
+directory. Restart shell starts a new shell in the selected folder.
+While the terminal has focus, control keys go to the terminal. Click the editor
+before using Ctrl+S or Ctrl+Q for the document.
 
 ## Controls
 

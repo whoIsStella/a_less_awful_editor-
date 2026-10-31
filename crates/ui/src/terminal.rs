@@ -19,6 +19,28 @@ fn nz(value: u16) -> NonZeroU16 {
     NonZeroU16::new(value.max(1)).unwrap()
 }
 struct Reply(mpsc::SyncSender<Vec<u8>>);
+
+pub(crate) fn init_keymap(cx: &mut App) {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    cx.bind_keys(
+        [
+            "ctrl-o",
+            "ctrl-shift-o",
+            "ctrl-1",
+            "ctrl-2",
+            "ctrl-3",
+            "ctrl-4",
+            "ctrl-b",
+            "ctrl-s",
+            "ctrl-shift-s",
+            "ctrl-w",
+            "ctrl-q",
+        ]
+        .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some("Terminal"))),
+    );
+}
 impl vt100::Callbacks for Reply {
     fn unhandled_csi(
         &mut self,
@@ -167,11 +189,11 @@ impl Drop for Session {
         // outside this session's ownership; no host-wide process scan is performed.
         #[cfg(unix)]
         {
-            if let Some(group) = self.master.process_group_leader() {
-                if group > 1 {
-                    unsafe {
-                        libc::kill(-group, libc::SIGHUP);
-                    }
+            if let Some(group) = self.master.process_group_leader()
+                && group > 1
+            {
+                unsafe {
+                    libc::kill(-group, libc::SIGHUP);
                 }
             }
             if let Some(pid) = self.pid {
@@ -187,6 +209,7 @@ impl Drop for Session {
 pub struct Terminal {
     session: Option<Session>,
     directory: PathBuf,
+    restart_directory: PathBuf,
     focus: FocusHandle,
     message: String,
 }
@@ -196,9 +219,20 @@ impl Focusable for Terminal {
     }
 }
 impl Terminal {
+    #[cfg(test)]
+    pub(crate) fn test_send(&mut self, bytes: &[u8]) {
+        self.send(bytes.to_vec());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_restart(&mut self) {
+        self.start();
+    }
+
     pub fn new(directory: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut view = Self {
             session: None,
+            restart_directory: directory.clone(),
             directory,
             focus: cx.focus_handle(),
             message: String::new(),
@@ -220,6 +254,7 @@ impl Terminal {
     }
     fn start(&mut self) {
         self.session = None;
+        self.directory = self.restart_directory.clone();
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         match Session::start(&self.directory, &shell) {
             Ok(s) => {
@@ -228,6 +263,9 @@ impl Terminal {
             }
             Err(e) => self.message = format!("Could not start shell: {e}"),
         }
+    }
+    pub(crate) fn set_restart_directory(&mut self, directory: PathBuf) {
+        self.restart_directory = directory;
     }
     fn send(&mut self, bytes: Vec<u8>) {
         if let Some(session) = &self.session {
@@ -388,6 +426,7 @@ impl Render for Terminal {
             .flex_col()
             .size_full()
             .font_family("monospace")
+            .key_context("Terminal")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {

@@ -172,9 +172,10 @@ impl ReplacementSite {
         for instruction in &instructions {
             match instruction.flow_control() {
                 FlowControl::Call|FlowControl::IndirectCall|FlowControl::IndirectBranch => return Err("Only standalone leaf-function replacements are supported in this first path.".into()),
-                FlowControl::ConditionalBranch|FlowControl::UnconditionalBranch => {
-                    if !boundaries.contains(&instruction.near_branch_target()) {return Err("Replacement branch leaves its instruction boundaries.".into());}
-                },
+                FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
+                    if !boundaries.contains(&instruction.near_branch_target()) => {
+                        return Err("Replacement branch leaves its instruction boundaries.".into());
+                    },
                 _=>(),
             }
             if instruction.is_ip_rel_memory_operand() {
