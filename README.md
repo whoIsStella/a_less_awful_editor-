@@ -30,6 +30,25 @@ Requires stable Rust and the native libraries listed below. From the project fol
 cargo run --locked -p a-less-awful-editor
 ```
 
+Open one existing file or folder directly:
+
+```bash
+cargo run --locked -p a-less-awful-editor -- src/main.c
+cargo run --locked -p a-less-awful-editor -- --binary build/firmware.elf
+cargo run --locked -p a-less-awful-editor -- --folder .
+```
+
+A plain path opens text. Use `--binary` for executable files or raw bytes,
+and `--folder` for the Files sidebar. Relative paths use the launch directory;
+quote paths containing spaces. Use `-- --name.c` for a text filename beginning
+with `-`. Opening a file does not select a project, start a shell, or run a
+toolchain. Folder browsing lists the selected directory and expands children
+on demand. Binary inspection never runs the input file.
+
+Run with `--help` for usage without a graphical session. Invalid arguments
+exit with status 2. Missing files, unsupported inputs, and read failures appear
+in the window. New files start from the empty buffer and **Save As**.
+
 ### Linux setup
 
 On Debian/Ubuntu-derived systems:

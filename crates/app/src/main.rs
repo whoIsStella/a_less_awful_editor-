@@ -1,3 +1,5 @@
+mod cli;
+
 use ale_ui::{
     AppShell, Close, InspectBinary, Open, OpenFolder, Quit, Save, SaveAs, ShowAssembly, ShowBytes,
     ShowEditor, ShowOverview, TogglePanels,
@@ -8,7 +10,19 @@ use gpui::{
 };
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    let target = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(cli::Launch::Help) => {
+            print!("{}", cli::HELP);
+            return;
+        }
+        Ok(cli::Launch::Empty) => None,
+        Ok(cli::Launch::Open(target)) => Some(target),
+        Err(error) => {
+            eprintln!("a-less-awful-editor: {error}");
+            std::process::exit(2);
+        }
+    };
+    Application::new().run(move |cx: &mut App| {
         ale_ui::prompts::init(cx);
         let modifier = if cfg!(target_os = "macos") {
             "cmd"
@@ -51,7 +65,15 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| AppShell::new(window, cx)),
+            |window, cx| {
+                cx.new(|cx| {
+                    let mut shell = AppShell::new(window, cx);
+                    if let Some(target) = target {
+                        shell.open_target(target, window, cx);
+                    }
+                    shell
+                })
+            },
         )
         .expect("failed to open the editor window");
         cx.activate(true);

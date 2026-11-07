@@ -26,6 +26,14 @@ use std::path::PathBuf;
 use systems::{Lens, Workbench};
 use systems_shell::BinaryIntent;
 
+/// An explicit document or folder request; opening it does not run its contents.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenTarget {
+    Text(PathBuf),
+    Binary(PathBuf),
+    Folder(PathBuf),
+}
+
 actions!(
     document,
     [
@@ -115,6 +123,37 @@ pub struct AppShell {
 }
 
 impl AppShell {
+    /// Use the same bounded loaders and document guards as the interactive commands.
+    pub fn open_target(&mut self, target: OpenTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let path = match &target {
+            OpenTarget::Text(path) | OpenTarget::Binary(path) | OpenTarget::Folder(path) => path,
+        };
+        // Keep the real path: canonicalizing would bypass the loaders' symlink checks.
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(path),
+                Err(error) => {
+                    self.failure(
+                        format!("Could not resolve the working directory: {error}"),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+            }
+        };
+        match target {
+            OpenTarget::Text(_) => self.open_text_path(path, window, cx),
+            OpenTarget::Binary(_) => self.inspect_path(path, window, cx),
+            OpenTarget::Folder(_) => self.select_folder(path, window, cx),
+        }
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| EditorView::new("", cx));
         editor.read(cx).focus_handle(cx).focus(window);
@@ -228,16 +267,9 @@ impl AppShell {
                     return;
                 }
             };
-            let result = cx
-                .background_executor()
-                .spawn(async move { persistence::load(&path) })
-                .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
-                match result {
-                    Ok(loaded) => this.request_replace(Intent::Open(Box::new(loaded)), window, cx),
-                    Err(error) => this.failure(format!("Open failed: {error}"), window, cx),
-                }
+                this.open_text_path(path, window, cx);
             });
         })
         .detach();
@@ -316,12 +348,13 @@ impl AppShell {
         .detach();
     }
 
-    fn open_explorer_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_text_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
         self.busy = true;
         self.status = "Opening file...".into();
+        cx.notify();
         let work = cx
             .background_executor()
             .spawn(async move { persistence::load(&path) });
@@ -1151,7 +1184,7 @@ impl AppShell {
                                 }
                                 cx.notify();
                             } else {
-                                this.open_explorer_file(path.clone(), window, cx);
+                                this.open_text_path(path.clone(), window, cx);
                             }
                         }))
                     })
@@ -1206,6 +1239,185 @@ impl AppShell {
 mod tests {
     use super::*;
     use gpui::{ClipboardItem, TestAppContext, VisualTestContext};
+
+    #[gpui::test]
+    fn direct_text_open_edits_and_saves_without_project_or_tools(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source λ.c");
+        std::fs::write(&path, "int answer = 42;\n").unwrap();
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let mut shell = AppShell::new(window, cx);
+            shell.open_target(OpenTarget::Text(path.clone()), window, cx);
+            shell
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            contents(&shell, cx),
+            (b"int answer = 42;\n".to_vec(), false)
+        );
+        cx.update(|_, cx| {
+            let shell = shell.read(cx);
+            assert_eq!(shell.path.as_ref(), Some(&path));
+            assert!(!shell.busy && !shell.explorer_visible);
+            assert!(shell.workbench.is_none() && shell.terminal.is_none());
+            assert!(shell.explorer_tree.root.is_none());
+        });
+        cx.simulate_input("// edited\n");
+        cx.dispatch_action(Save);
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"// edited\nint answer = 42;\n"
+        );
+        assert!(!contents(&shell, cx).1);
+    }
+
+    #[gpui::test]
+    fn direct_binary_open_retains_dirty_text_and_uses_binary_views(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.bin");
+        let bytes = b"\xb8\x2a\0\0\0\xc3";
+        std::fs::write(&path, bytes).unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.simulate_input("keep my source");
+        let before = contents(&shell, cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_target(OpenTarget::Binary(path.clone()), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        for view in 0..3 {
+            match view {
+                0 => cx.dispatch_action(ShowAssembly),
+                1 => cx.dispatch_action(ShowBytes),
+                _ => cx.dispatch_action(ShowOverview),
+            }
+            cx.update(|_, cx| {
+                let shell = shell.read(cx);
+                assert!(shell.systems_active && !shell.busy);
+                assert!(shell.terminal.is_none() && shell.explorer_tree.root.is_none());
+                let workbench = shell.workbench.as_ref().unwrap().read(cx);
+                assert_eq!(workbench.path, path);
+                assert_eq!(workbench.snapshot().0.bytes(), bytes);
+                assert!(!workbench.is_dirty());
+            });
+        }
+        cx.dispatch_action(ShowEditor);
+        assert_eq!(contents(&shell, cx), before);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[gpui::test]
+    fn direct_open_failures_and_cancel_preserve_document(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = dir.path().join("invalid.txt");
+        let valid = dir.path().join("valid.txt");
+        std::fs::write(&invalid, [0xff, 0xfe]).unwrap();
+        std::fs::write(&valid, "replacement").unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.simulate_input("keep my changes");
+        let before = contents(&shell, cx);
+        for target in [
+            OpenTarget::Text(invalid),
+            OpenTarget::Binary(dir.path().join("missing.bin")),
+        ] {
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| shell.open_target(target, window, cx))
+            });
+            cx.run_until_parked();
+            assert_eq!(contents(&shell, cx), before);
+            cx.update(|_, cx| {
+                let shell = shell.read(cx);
+                assert!(!shell.busy && shell.workbench.is_none());
+                assert!(shell.status.contains("failed:"));
+            });
+        }
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_target(OpenTarget::Text(valid), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(contents(&shell, cx), before);
+    }
+
+    #[gpui::test]
+    fn direct_folder_open_only_lists_the_selected_scope(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/hidden.txt"), "not listed yet").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "visible").unwrap();
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let mut shell = AppShell::new(window, cx);
+            shell.open_target(OpenTarget::Folder(dir.path().into()), window, cx);
+            shell
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let shell = shell.read(cx);
+            assert_eq!(shell.explorer_tree.root.as_deref(), Some(dir.path()));
+            assert!(shell.explorer_visible && !shell.busy);
+            assert!(shell.terminal.is_none() && shell.workbench.is_none() && shell.path.is_none());
+            let names: Vec<_> = shell
+                .explorer_tree
+                .rows()
+                .into_iter()
+                .map(|row| row.name)
+                .collect();
+            assert!(names.contains(&"visible.txt".to_owned()));
+            assert!(names.contains(&"nested".to_owned()));
+            assert!(!names.contains(&"hidden.txt".to_owned()));
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn direct_open_keeps_symlink_restrictions(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("source.txt"), "original").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (shell, cx) = cx.add_window_view(AppShell::new);
+        cx.simulate_input("retained");
+        let before = contents(&shell, cx);
+        for target in [
+            OpenTarget::Text(link.join("source.txt")),
+            OpenTarget::Binary(link.join("source.txt")),
+        ] {
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| shell.open_target(target, window, cx))
+            });
+            cx.run_until_parked();
+            assert_eq!(contents(&shell, cx), before);
+            cx.update(|_, cx| {
+                let shell = shell.read(cx);
+                assert!(shell.status.contains("Symbolic links"), "{}", shell.status);
+                assert!(shell.workbench.is_none() && shell.path.is_none());
+            });
+        }
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_target(OpenTarget::Folder(link), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let rows = shell.read(cx).explorer_tree.rows();
+            assert!(
+                rows.iter()
+                    .any(|row| row.note && row.name.contains("Symbolic-link"))
+            );
+            assert!(!rows.iter().any(|row| row.name == "source.txt"));
+        });
+        assert_eq!(contents(&shell, cx), before);
+        assert_eq!(std::fs::read(real.join("source.txt")).unwrap(), b"original");
+    }
 
     fn contents(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> (Vec<u8>, bool) {
         cx.update(|_, cx| {

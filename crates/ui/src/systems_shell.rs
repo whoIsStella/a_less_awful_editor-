@@ -110,10 +110,31 @@ impl AppShell {
                     return;
                 }
             };
-            let worker_path = path.clone();
-            let work = cx.background_executor().spawn(async move {
-                systems_io::read_binary(&worker_path).and_then(BinaryImage::parse)
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                this.inspect_path(path, window, cx);
             });
+        })
+        .detach();
+    }
+
+    pub(super) fn inspect_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.status = "Loading binary for inspection...".into();
+        cx.notify();
+        let worker_path = path.clone();
+        let work = cx.background_executor().spawn(async move {
+            systems_io::read_binary(&worker_path).and_then(BinaryImage::parse)
+        });
+        cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
