@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+editor_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${ALE_NATIVE_CACHE:-"${XDG_CACHE_HOME:-${HOME:?HOME or ALE_NATIVE_CACHE must be set}/.cache}/ale-native-decompiler"}
+exec python3 "$editor_root/tools/native-decompiler/worker.py" --backend "$cache/ale-native-decompiler-backend" --languages "$cache/Ghidra/Processors/x86/data/languages" "$@"

@@ -1,20 +1,24 @@
 # A Less Awful Editor
 
-A native, local-first text editor and binary workbench for programmers who want
-to edit source code and inspect compiled files in one workspace.
+A native systems-programming and reverse-engineering workbench for working
+across source code, recovered C, assembly and executable bytes. The wider goal
+includes hardware logic, firmware, OS development and language/toolchain design.
 
-Edit UTF-8 text, follow machine instructions, inspect bytes and control flow,
-and preview binary patches before exporting a separate copy. Your text stays
+Edit source and recovered code, inspect machine instructions and control flow,
+and preview rebuilt functions or byte patches before exporting a separate copy. Your text stays
 open when you switch to binary views. No account or cloud service is required.
 
 ## What you can do
 
-- Browse a selected folder and open its files.
-- Edit and save UTF-8 text with Unicode navigation, selection, clipboard, and undo/redo.
+- Run a local shell in the integrated Terminal panel on Linux.
+- Browse a selected folder and open its files; edit and save UTF-8 text with
+  Unicode navigation, selection, clipboard, and undo/redo.
+- Explore callers and outgoing call sites through **Flow → Calls**.
 - Inspect ELF, PE, and Mach-O files with linked assembly, bytes, symbols, and strings.
 - Explore x86/x86-64 functions and control-flow graphs, and navigate to source when DWARF information is available.
 - Preview instruction or byte edits, undo patches, and export to a new file without overwriting the original.
-- View recovered pseudocode for supported Linux x86-64 binaries with the optional native decompiler.
+- Recover pseudocode with the native decompiler and edit it as C.
+- Compile and preview supported standalone C function replacements for named Linux x86-64 ELF functions, then export a separate executable copy.
 
 ![Assembly view with linked binary navigation](docs/screenshots/workbench-assembly.png)
 
@@ -51,6 +55,9 @@ Inspection and byte patching work without it.
 - **Ctrl+Shift+O** opens a binary for inspection.
 - **Ctrl+1** returns to your text; **Ctrl+2**, **Ctrl+3**, and **Ctrl+4** show binary overview, assembly, and bytes.
 - **Export copy** writes patched bytes to a new file.
+- **Terminal** starts your shell in the selected folder or open file’s parent.
+  Run your project's build command explicitly. Ctrl+C interrupts; Ctrl+Shift+V
+  pastes. Click the editor before using shortcuts such as Ctrl+S or Ctrl+Q.
 
 Read the [text editing guide](docs/scratch-editor.md),
 [binary workbench guide](docs/systems-workbench.md), or
@@ -62,11 +69,24 @@ Text files must be regular UTF-8 files no larger than 16 MiB; binary inspection
 accepts files up to 64 MiB. Symlink paths are rejected. Overwriting existing text
 files is supported on Linux; use Save As to a new file on other systems.
 
-The folder browser shows one directory at a time, up to 500 entries, and excludes
-symbolic links. Use Refresh after files change. It does not provide a full
-project tree.
+The Files sidebar is an expandable tree. Select a folder to expand or collapse
+its children while keeping parent folders and siblings visible. Use Refresh
+after files change; open branches stay expanded. Directory listings show up to
+500 entries and exclude symbolic links. The tree limits cached folders, depth
+and visible rows to keep large projects bounded.
 
-There is no integrated terminal, language diagnostics, Git client, debugger,
-or syntax highlighting.
-Binary patches do not repair relocations, signatures, or checksums. Recovered
+The Linux terminal has a real PTY, resize, bounded scrollback and restart.
+Output is monochrome; copy captures the screen, with no selection or full IME
+support. Existing shells retain their working directory when the sidebar root
+changes; Restart shell starts in the newly selected folder. Stop sends hangup
+to the shell and foreground group; detached daemons are outside cleanup.
+Language diagnostics, Git integration, debugging and
+syntax highlighting remain unimplemented.
+Ordinary byte and instruction patches do not repair relocations, signatures, or
+checksums. Recovered
 pseudocode uses inferred names and types; it is not the original source.
+
+Read [the native round-trip guide](docs/native-roundtrip.md). Current replacement
+supports fixed-span edits and an opt-in bounded relocated mode for qualified
+Linux x86-64 executables and PIEs. Broader rewriting, hardware and language
+toolchains remain work.

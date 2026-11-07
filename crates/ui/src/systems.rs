@@ -1,7 +1,10 @@
 //! Native linked views of one immutable binary snapshot. No target code is run.
 use crate::systems_io;
 use ale_editor_view::EditorView;
-use ale_systems_core::{Architecture, BinaryImage, Instruction, SourceLocation};
+use ale_systems_core::{
+    Architecture, BinaryImage, Instruction, SourceLocation,
+    rebuild::{PlacementMode, ReplacementPlan},
+};
 use gpui::{
     App, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     Render, Stateful, Window, div, prelude::*, px, rgb,
@@ -14,6 +17,9 @@ use analysis::AnalysisState;
 #[path = "systems_decompiler.rs"]
 mod native_decompiler;
 use native_decompiler::DecompilerState;
+#[path = "systems_recompile.rs"]
+mod native_recompile;
+use native_recompile::Compilation;
 
 #[cfg(test)]
 #[path = "systems_tests.rs"]
@@ -70,6 +76,99 @@ impl Command {
 pub(crate) enum WorkbenchEvent {
     Source(SourceLocation),
     Export,
+    RecoveredC {
+        text: String,
+        site: ale_systems_core::recompile::ReplacementSite,
+        revision: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeGuard {
+    owner: gpui::EntityId,
+    generation: u64,
+    source: gpui::EntityId,
+    source_revision: u64,
+}
+#[derive(Clone)]
+enum Preview {
+    Bytes {
+        offset: usize,
+        bytes: Vec<u8>,
+        binary_revision: u64,
+    },
+    Native {
+        plan: Arc<ReplacementPlan>,
+        binary_revision: u64,
+        compiler_identity: String,
+        guard: NativeGuard,
+    },
+}
+impl std::fmt::Debug for Preview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes {
+                offset,
+                bytes,
+                binary_revision,
+            } => f
+                .debug_struct("Bytes")
+                .field("offset", offset)
+                .field("bytes", bytes)
+                .field("binary_revision", binary_revision)
+                .finish(),
+            Self::Native {
+                plan,
+                binary_revision,
+                compiler_identity,
+                guard,
+            } => f
+                .debug_struct("Native")
+                .field("summary", plan.summary())
+                .field("binary_revision", binary_revision)
+                .field("compiler_identity", compiler_identity)
+                .field("guard", guard)
+                .finish(),
+        }
+    }
+}
+impl PartialEq for Preview {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Bytes {
+                    offset: a,
+                    bytes: b,
+                    binary_revision: c,
+                },
+                Self::Bytes {
+                    offset: x,
+                    bytes: y,
+                    binary_revision: z,
+                },
+            ) => a == x && b == y && c == z,
+            (
+                Self::Native {
+                    plan: a,
+                    binary_revision: b,
+                    compiler_identity: c,
+                    guard: d,
+                },
+                Self::Native {
+                    plan: x,
+                    binary_revision: y,
+                    compiler_identity: z,
+                    guard: w,
+                },
+            ) => Arc::ptr_eq(a, x) && b == y && c == z && d == w,
+            _ => false,
+        }
+    }
+}
+struct BinaryHistoryEntry {
+    revision: u64,
+    image: Arc<BinaryImage>,
+    executable_export: bool,
 }
 
 pub(crate) struct Workbench {
@@ -84,12 +183,15 @@ pub(crate) struct Workbench {
     input_revision: u64,
     command: Command,
     message: String,
-    preview: Option<(usize, Vec<u8>, u64)>,
+    preview: Option<Preview>,
+    preview_body_visible: bool,
+    placement_mode: PlacementMode,
     revision: u64,
+    target_epoch: u64,
     next_revision: u64,
     saved_revision: u64,
-    undo: Vec<(u64, Arc<BinaryImage>)>,
-    redo: Vec<(u64, Arc<BinaryImage>)>,
+    undo: Vec<BinaryHistoryEntry>,
+    redo: Vec<BinaryHistoryEntry>,
     back: Vec<usize>,
     instructions: Vec<Instruction>,
     decode_error: Option<String>,
@@ -103,11 +205,77 @@ pub(crate) struct Workbench {
     scroll: gpui::ScrollHandle,
     analysis: AnalysisState,
     decompiler: DecompilerState,
+    compilation: Compilation,
+    executable_export: bool,
 }
 impl EventEmitter<WorkbenchEvent> for Workbench {}
 impl Focusable for Workbench {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+fn native_preview_text(plan: &ReplacementPlan, compiler: &str) -> String {
+    let summary = plan.summary();
+    let ranges = summary
+        .changed_original_ranges
+        .iter()
+        .map(|r| format!("{:#x}..{:#x}", r.start, r.end))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let relocations = summary
+        .relocations
+        .iter()
+        .map(|r| {
+            format!(
+                "field {:#x} → {} {:#x} (addend {})",
+                r.field_address, r.symbol, r.target_address, r.addend
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let warnings = if summary.warnings.is_empty() {
+        "ABI compatibility is not proven.".to_owned()
+    } else {
+        summary.warnings.join(" ")
+    };
+    format!(
+        "{} · entry {:#x} · body {:#x} · original {} bytes · body {} bytes · appended {} bytes · read-only {} bytes · changed original ranges: {} · relocations: {} · {} · compiler: {}",
+        if summary.mode == PlacementMode::Relocated {
+            "Relocated"
+        } else {
+            "Fixed span"
+        },
+        summary.entry_address,
+        summary.body_address,
+        summary.original_span.len(),
+        summary.body_span.len(),
+        summary.appended_bytes,
+        summary.rodata_bytes,
+        ranges,
+        if relocations.is_empty() {
+            "none"
+        } else {
+            &relocations
+        },
+        warnings,
+        compiler
+    )
+}
+fn native_body_text(plan: &ReplacementPlan) -> String {
+    let summary = plan.summary();
+    match plan.candidate().disassemble_as(
+        &Architecture::X86_64,
+        summary.body_span.start,
+        summary.body_span.len().min(512),
+        32,
+    ) {
+        Ok(instructions) => instructions
+            .iter()
+            .map(|i| format!("{:#x}: {}", i.address, i.text))
+            .collect::<Vec<_>>()
+            .join("  "),
+        Err(error) => format!("Body disassembly unavailable: {error}"),
     }
 }
 
@@ -156,6 +324,7 @@ impl Workbench {
             })
             .unwrap_or(0);
         let architecture = image.architecture.clone();
+        let executable_export = !image.rewrite_locations().is_empty();
         let mut this = Self {
             path,
             image: Arc::new(image),
@@ -170,7 +339,10 @@ impl Workbench {
             message: "Choose a section or symbol, then move between source, assembly, and bytes."
                 .into(),
             preview: None,
+            preview_body_visible: false,
+            placement_mode: PlacementMode::FixedSpan,
             revision: 0,
+            target_epoch: 0,
             next_revision: 1,
             saved_revision: 0,
             undo: Vec::new(),
@@ -188,6 +360,8 @@ impl Workbench {
             scroll: gpui::ScrollHandle::new(),
             analysis: AnalysisState::default(),
             decompiler: DecompilerState::default(),
+            compilation: Compilation::default(),
+            executable_export,
         };
         this.decode();
         this.refresh_entropy(cx);
@@ -197,11 +371,20 @@ impl Workbench {
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
     }
+    pub fn executable_export(&self) -> bool {
+        self.executable_export
+    }
+    pub fn is_compiling(&self) -> bool {
+        self.compilation.running
+    }
     pub fn is_busy(&self) -> bool {
         self.busy
     }
     pub fn snapshot(&self) -> (Arc<BinaryImage>, u64) {
         (self.image.clone(), self.revision)
+    }
+    pub(crate) fn target_epoch(&self) -> u64 {
+        self.target_epoch
     }
     pub fn mark_exported(&mut self, revision: u64, cx: &mut Context<Self>) {
         self.saved_revision = revision;
@@ -251,6 +434,7 @@ impl Workbench {
                 self.back.remove(0);
             }
         }
+        self.invalidate_compilation();
         self.offset = offset;
         self.decompiler_location_changed();
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
@@ -307,15 +491,25 @@ impl Workbench {
         } else {
             self.undo.pop()
         };
-        if let Some((revision, image)) = item {
-            let current = (self.revision, self.image.clone());
+        if let Some(item) = item {
+            self.invalidate_compilation();
+            let current = BinaryHistoryEntry {
+                revision: self.revision,
+                image: self.image.clone(),
+                executable_export: self.executable_export,
+            };
             if redo {
                 self.undo.push(current);
             } else {
                 self.redo.push(current);
             }
-            self.revision = revision;
-            self.image = image;
+            self.revision = item.revision;
+            self.executable_export = item.executable_export;
+            self.target_epoch = self.target_epoch.wrapping_add(1);
+            self.image = item.image;
+            self.offset = self.offset.min(self.image.bytes().len().saturating_sub(1));
+            self.back.clear();
+            self.matches.clear();
             self.preview = None;
             self.decode();
             self.refresh_entropy(cx);
@@ -328,7 +522,7 @@ impl Workbench {
         if self.busy {
             return;
         }
-        self.preview = None;
+        self.invalidate_compilation();
         let text = self.input.read(cx).text();
         if text.len() > 4096 {
             self.message = "Command is too long (maximum 4096 UTF-8 bytes).".into();
@@ -426,7 +620,12 @@ impl Workbench {
                             bytes.len(),
                             self.offset
                         );
-                        self.preview = Some((self.offset, bytes, self.revision));
+                        self.invalidate_compilation();
+                        self.preview = Some(Preview::Bytes {
+                            offset: self.offset,
+                            bytes,
+                            binary_revision: self.revision,
+                        });
                     }
                     _ => {
                         self.message =
@@ -435,6 +634,7 @@ impl Workbench {
                 }
             }
             Command::Assemble => {
+                self.invalidate_compilation();
                 let bitness = match self.architecture {
                     Architecture::X86 => 32,
                     Architecture::X86_64 => 64,
@@ -470,7 +670,7 @@ impl Workbench {
                         Ok(bytes) if bytes.len() == size && this.offset == offset && this.revision == revision
                             && this.input_generation == input_generation && this.command == Command::Assemble => {
                             this.message = format!("Assembly preview: {} bytes. Apply to replace this instruction in memory.",bytes.len());
-                            this.preview = Some((offset,bytes,revision));
+                            this.preview = Some(Preview::Bytes {offset,bytes,binary_revision:revision});
                         }
                         Ok(bytes) => this.message = format!("Not applied: encoding is {} bytes; selected instruction is {size}. Location must stay unchanged and sizes must match.",bytes.len()),
                         Err(error) => this.message = format!("Assembly failed: {error}"),
@@ -485,42 +685,125 @@ impl Workbench {
         if self.busy {
             return;
         }
-        let Some((offset, bytes, revision)) = self.preview.take() else {
+        if let Some((source, revision)) = &self.compilation.source
+            && source.read(cx).content_revision() != *revision
+        {
+            self.invalidate_compilation();
+            self.message = "C source changed; compile a new preview before applying.".into();
+            cx.notify();
+            return;
+        }
+        let Some(preview) = self.preview.take() else {
             return;
         };
-        if revision != self.revision {
+        let (revision, native) = match &preview {
+            Preview::Bytes {
+                binary_revision, ..
+            } => (*binary_revision, false),
+            Preview::Native {
+                binary_revision, ..
+            } => (*binary_revision, true),
+        };
+        let guard_valid = match &preview {
+            Preview::Native { guard, .. } => {
+                guard.owner == cx.entity_id()
+                    && guard.generation == self.compilation.generation
+                    && self
+                        .compilation
+                        .source
+                        .as_ref()
+                        .is_some_and(|(source, revision)| {
+                            source.entity_id() == guard.source
+                                && *revision == guard.source_revision
+                                && source.read(cx).content_revision() == guard.source_revision
+                        })
+            }
+            Preview::Bytes { .. } => true,
+        };
+        if revision != self.revision || !guard_valid {
             self.message = "Stale preview; run the command again.".into();
             cx.notify();
             return;
         }
-        if self
-            .image
-            .bytes()
-            .get(offset..offset.saturating_add(bytes.len()))
-            == Some(bytes.as_slice())
-        {
+        let unchanged = match &preview {
+            Preview::Bytes { offset, bytes, .. } => {
+                self.image
+                    .bytes()
+                    .get(*offset..offset.saturating_add(bytes.len()))
+                    == Some(bytes.as_slice())
+            }
+            Preview::Native { plan, .. } => plan.candidate().bytes() == self.image.bytes(),
+        };
+        if unchanged {
             self.message = "Bytes already match; no patch was added.".into();
             cx.notify();
             return;
         }
+        let source_guard = self.compilation.source.clone();
+        let generation = self.compilation.generation;
         let image = self.image.clone();
         self.busy = true;
-        let work = cx
-            .background_executor()
-            .spawn(async move { image.patched(offset, &bytes) });
-        cx.spawn(async move |this,cx| { let result = work.await; let _ = this.update(cx,|this,cx| {
-            this.busy = false;
-            match result {
-                Ok(image) => {
-                    this.undo.push((this.revision,this.image.clone()));
-                    while this.undo.len() > 32 || this.undo.iter().map(|(_,image)|image.bytes().len()).sum::<usize>() > 128*1024*1024 { this.undo.remove(0); }
-                    this.redo.clear(); this.image = Arc::new(image); this.revision = this.next_revision; this.next_revision += 1;
-                    this.decode(); this.refresh_entropy(cx); this.refresh_analysis(cx); this.message = "Patch applied in memory. Export copy to write a new file; source mappings describe the original build.".into();
-                }
-                Err(error) => this.message = format!("Patch rejected; buffer retained: {error}"),
+        let work = cx.background_executor().spawn(async move {
+            match preview {
+                Preview::Bytes { offset, bytes, .. } => image.patched(offset, &bytes),
+                Preview::Native { plan, .. } => plan.apply_to(&image).map_err(|e| e.to_string()),
             }
-            cx.notify();
-        }); }).detach();
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                if this.revision != revision
+                    || (native
+                        && (this.compilation.generation != generation
+                            || source_guard.as_ref().is_none_or(|(source, r)| {
+                                source.read(cx).content_revision() != *r
+                            })))
+                {
+                    this.invalidate_compilation();
+                    this.message = "The source or binary changed; compile a new preview.".into();
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(image) => {
+                        this.undo.push(BinaryHistoryEntry {
+                            revision: this.revision,
+                            image: this.image.clone(),
+                            executable_export: this.executable_export,
+                        });
+                        while this.undo.len() > 32
+                            || this
+                                .undo
+                                .iter()
+                                .map(|entry| entry.image.bytes().len())
+                                .sum::<usize>()
+                                > 128 * 1024 * 1024
+                        {
+                            this.undo.remove(0);
+                        }
+                        this.redo.clear();
+                        this.executable_export |= native;
+                        this.image = Arc::new(image);
+                        this.back.clear();
+                        this.matches.clear();
+                        this.revision = this.next_revision;
+                        this.next_revision += 1;
+                        this.target_epoch = this.target_epoch.wrapping_add(1);
+                        this.decode();
+                        this.refresh_entropy(cx);
+                        this.refresh_analysis(cx);
+                        this.message =
+                            "Patch applied in memory. Export copy to write a new file.".into();
+                    }
+                    Err(error) => {
+                        this.message = format!("Patch rejected; buffer retained: {error}")
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn source(&mut self, cx: &mut Context<Self>) {
         if let Some(location) = self.image.source_at_offset(self.offset).cloned() {
@@ -1031,13 +1314,20 @@ impl Render for Workbench {
                 .child(div().flex_1().min_w_0().h(px(25.0)).child(self.input.clone()))
                 .child(button(if self.busy { "Working…" } else { "Run" }).text_color(rgb(0x7aa2f7))
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx)))))
-            .when_some(self.preview.as_ref().map(|(_, bytes, _)| hex(bytes)), |root, bytes| root.child(
+            .when_some(self.preview.as_ref().and_then(|preview|match preview {Preview::Bytes {bytes,..}=>Some(hex(bytes)),_=>None}), |root, bytes| root.child(
                 div().flex().items_center().gap_2().h(px(30.0)).flex_shrink_0().px_3().bg(rgb(0x1c2a3d))
                     .child(div().text_size(px(11.0)).text_color(rgb(0x8590a3)).child("PREVIEW"))
                     .child(div().flex_1().min_w_0().truncate().font_family("DejaVu Sans Mono").text_size(px(12.0)).text_color(rgb(0x7dcfff)).child(bytes.clone()))
                     .child(button("Copy bytes").on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(bytes.clone())))))
-                    .child(button("Apply patch").bg(rgb(0x7aa2f7)).text_color(rgb(0x101216))
-                        .on_click(cx.listener(|this, _, _, cx| this.apply_patch(cx))))))
+                    .child(button("Apply patch").bg(rgb(0x7aa2f7)).text_color(rgb(0x101216)).on_click(cx.listener(|this, _, _, cx| this.apply_patch(cx))))))
+            .when_some(self.preview.as_ref().and_then(|preview|match preview {Preview::Native {plan,compiler_identity,..}=>Some((native_preview_text(plan,compiler_identity),native_body_text(plan))),_=>None}), |root, (summary,body)| root.child(
+                div().flex().flex_col().flex_shrink_0().px_3().py_1().bg(rgb(0x1c2a3d)).gap_1()
+                    .child(div().id("native-preview-details").max_h(px(150.0)).overflow_scroll().whitespace_normal().text_size(px(11.0)).text_color(rgb(0x7dcfff)).child(summary))
+                    .when(self.preview_body_visible,|panel|panel.child(div().id("native-preview-body").max_h(px(100.0)).overflow_scroll().whitespace_normal().font_family("DejaVu Sans Mono").text_size(px(11.0)).child(body)))
+                    .child(div().flex().gap_2()
+                        .child(button(if self.preview_body_visible {"Hide body"} else {"View body"}).on_click(cx.listener(|this,_,_,cx|{this.preview_body_visible = !this.preview_body_visible;cx.notify();})))
+                        .child(button("Cancel preview").on_click(cx.listener(|this,_,_,cx|{this.invalidate_compilation();this.message="Preview cancelled; source and binary retained.".into();cx.notify();})))
+                        .child(button("Apply replacement").bg(rgb(0x7aa2f7)).text_color(rgb(0x101216)).on_click(cx.listener(|this,_,_,cx|this.apply_patch(cx)))))))
             .child(div().id("systems-message").h(px(22.0)).flex_shrink_0().flex().items_center().px_3()
                 .border_t_1().border_color(rgb(0x2a313c)).text_size(px(11.0)).text_color(rgb(0x8590a3))
                 .child(div().truncate().child(self.message.clone())))

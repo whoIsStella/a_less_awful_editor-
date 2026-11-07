@@ -159,41 +159,50 @@ struct Region {
 }
 struct RangeIndex {
     entries: Vec<(u64, u64, usize)>,
-    max_ends: Vec<u64>,
+    /// Largest end, second-largest end (including ties), and owner of the
+    /// largest end for each prefix. These identify zero, one, or multiple
+    /// covering intervals without a reverse scan through nested/expired ranges.
+    prefix: Vec<(u64, u64, usize)>,
 }
 
 impl RangeIndex {
     fn new(mut entries: Vec<(u64, u64, usize)>) -> Self {
+        entries.retain(|(start, end, _)| start < end);
         entries.sort_unstable();
         let mut largest = 0;
-        let max_ends = entries
+        let mut second_largest = 0;
+        let mut owner = 0;
+        let prefix = entries
             .iter()
-            .map(|(_, end, _)| {
-                largest = largest.max(*end);
-                largest
+            .map(|(_, end, region)| {
+                if *end >= largest {
+                    second_largest = largest;
+                    largest = *end;
+                    owner = *region;
+                } else {
+                    second_largest = second_largest.max(*end);
+                }
+                (largest, second_largest, owner)
             })
             .collect();
-        Self { entries, max_ends }
+        Self { entries, prefix }
     }
 
     fn find(&self, value: u64) -> Result<usize, EdgeResolution> {
         let end = self
             .entries
             .partition_point(|(start, _, _)| *start <= value);
-        let mut result = None;
-        for index in (0..end).rev() {
-            if self.max_ends[index] <= value {
-                break;
-            }
-            let (_, end, region) = self.entries[index];
-            if value < end {
-                if result.is_some() {
-                    return Err(EdgeResolution::Overlap);
-                }
-                result = Some(region);
-            }
+        let Some(index) = end.checked_sub(1) else {
+            return Err(EdgeResolution::Unmapped);
+        };
+        let (largest, second_largest, owner) = self.prefix[index];
+        if largest <= value {
+            Err(EdgeResolution::Unmapped)
+        } else if second_largest > value {
+            Err(EdgeResolution::Overlap)
+        } else {
+            Ok(owner)
         }
-        result.ok_or(EdgeResolution::Unmapped)
     }
 }
 
@@ -685,6 +694,7 @@ impl Analyzer<'_> {
         // Every reachable instruction not preceded by a straight-line predecessor
         // is a leader; branch targets split an earlier decoded linear run.
         for (&offset, node) in &nodes {
+            check_cancelled(self.cancelled)?;
             if node.ends_block {
                 continue;
             }
@@ -723,13 +733,12 @@ impl Analyzer<'_> {
                 assigned.insert(offset);
                 let next = node.edges.first().and_then(|edge| edge.target_offset);
                 let split = next.is_none_or(|next| {
-                    next <= offset
+                    next != offset + node.instruction.bytes.len()
                         || !nodes.contains_key(&next)
                         || assigned.contains(&next)
-                        || queued.contains(&nodes[&next].instruction.address) && node.ends_block
+                        || leaders.contains(&next)
                 });
-                let other_leader = next.is_some_and(|next| leaders.contains(&next));
-                if node.ends_block || split || other_leader {
+                if node.ends_block || split {
                     break (nodes[&start].instruction.address, node.edges.clone());
                 }
                 offset = next.expect("straight-line successor");
@@ -753,28 +762,33 @@ impl Analyzer<'_> {
 
     fn finish(mut self) -> Result<Analysis, String> {
         check_cancelled(self.cancelled)?;
-        let included: BTreeSet<_> = self
-            .result
-            .functions
-            .iter()
-            .flat_map(|function| function.blocks.iter())
-            .flat_map(|block| {
-                block
-                    .instructions
-                    .iter()
-                    .map(|instruction| instruction.offset)
-            })
-            .collect();
+        let mut included = BTreeSet::new();
+        let mut invalid = BTreeSet::new();
+        for function in &self.result.functions {
+            for block in &function.blocks {
+                for instruction in &block.instructions {
+                    check_cancelled(self.cancelled)?;
+                    included.insert(instruction.offset);
+                    if !instruction.valid {
+                        invalid.insert(instruction.offset);
+                    }
+                }
+            }
+        }
         for function in &mut self.result.functions {
             check_cancelled(self.cancelled)?;
             for block in &mut function.blocks {
                 self.result.instruction_count += block.instructions.len();
                 for edge in &mut block.edges {
+                    check_cancelled(self.cancelled)?;
                     if edge.resolution == EdgeResolution::Resolved
                         && let Some(offset) = edge.target_offset
                     {
                         if let Some(reason) = self.rejected.get(&offset) {
                             edge.resolution = *reason;
+                        } else if invalid.contains(&offset) {
+                            // A displayed undecodable byte is not recovered code.
+                            edge.resolution = EdgeResolution::Invalid;
                         } else if !included.contains(&offset) {
                             edge.resolution = EdgeResolution::Limit;
                         }
@@ -797,6 +811,7 @@ impl Analyzer<'_> {
             check_cancelled(self.cancelled)?;
             for block in &function.blocks {
                 for edge in &block.edges {
+                    check_cancelled(self.cancelled)?;
                     let kind = match edge.kind {
                         EdgeKind::Call => ReferenceKind::Call,
                         EdgeKind::ConditionalBranch => ReferenceKind::ConditionalBranch,
@@ -1161,3 +1176,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "analysis_tests.rs"]
+mod hardening_tests;

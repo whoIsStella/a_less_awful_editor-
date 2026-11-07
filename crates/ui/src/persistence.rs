@@ -106,7 +106,7 @@ fn read_version(path: &Path) -> Result<Option<(DiskVersion, Metadata)>, String> 
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() as u64 > MAX_BYTES {
-        return Err("Files larger than 16 MiB are not supported in this milestone.".into());
+        return Err("Files larger than 16 MiB are not supported.".into());
     }
     let after = file.metadata().map_err(|e| e.to_string())?;
     if DiskVersion::new(Vec::new(), &before) != DiskVersion::new(Vec::new(), &after)
@@ -155,12 +155,46 @@ fn save_impl(
     expected: Option<&DiskVersion>,
     before_commit: impl FnOnce(),
 ) -> Result<DiskVersion, SaveError> {
+    save_with_directory_sync(path, snapshot, expected, before_commit, |parent| {
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = parent;
+        Ok(())
+    })
+}
+
+pub(crate) fn save_with_directory_sync(
+    path: &Path,
+    snapshot: &TextSnapshot,
+    expected: Option<&DiskVersion>,
+    before_commit: impl FnOnce(),
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<DiskVersion, SaveError> {
+    save_with_hooks(
+        path,
+        snapshot,
+        expected,
+        before_commit,
+        |snapshot, file| snapshot.write_to(file),
+        sync_directory,
+    )
+}
+
+fn save_with_hooks(
+    path: &Path,
+    snapshot: &TextSnapshot,
+    expected: Option<&DiskVersion>,
+    before_commit: impl FnOnce(),
+    write_temporary: impl FnOnce(&TextSnapshot, &mut File) -> std::io::Result<()>,
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<DiskVersion, SaveError> {
     let path = checked_path(path).map_err(SaveError::Failed)?;
     let current = read_version(&path).map_err(SaveError::Failed)?;
     if current.as_ref().map(|(version, _)| version) != expected {
         return Err(SaveError::Conflict(current.map(|(v, _)| v)));
     }
-    // Metadata preservation has only been implemented for Linux in this milestone.
+    // Metadata-preserving overwrite is supported only on Linux.
     #[cfg(not(target_os = "linux"))]
     if current.is_some() {
         return Err(SaveError::Failed("Overwriting existing files is currently supported only on Linux. Use Save As with a new destination.".into()));
@@ -199,7 +233,7 @@ fn save_impl(
             }
         }
     }
-    snapshot.write_to(temporary.as_file_mut())?;
+    write_temporary(snapshot, temporary.as_file_mut())?;
     temporary.flush()?;
     if temporary.as_file().metadata()?.len() > MAX_BYTES {
         return Err(SaveError::Failed(
@@ -238,8 +272,7 @@ fn save_impl(
             .persist(&path)
             .map_err(|e| SaveError::Failed(e.error.to_string()))?;
     }
-    #[cfg(unix)]
-    File::open(parent)?.sync_all().map_err(|e| SaveError::Failed(format!(
+    sync_directory(parent).map_err(|e| SaveError::Failed(format!(
         "File replaced, but directory sync failed ({e}). Durability is uncertain; buffer remains dirty.")))?;
     Ok(version)
 }
@@ -321,6 +354,126 @@ mod tests {
         });
         assert!(matches!(result, Err(SaveError::Conflict(_))));
         assert_eq!(fs::read(&path).unwrap(), b"racing writer");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_temporary_write_keeps_destination_and_dirty_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, "original").unwrap();
+        let mut loaded = load(&path).unwrap();
+        loaded.buffer.insert("edit");
+        let snapshot = loaded.buffer.text_snapshot();
+        let result = save_with_hooks(
+            &path,
+            &snapshot,
+            Some(&loaded.version),
+            || panic!("commit must not run after a failed write"),
+            |_, file| {
+                file.write_all(b"partial")?;
+                Err(std::io::Error::other("injected write failure"))
+            },
+            |_| panic!("directory sync must not run after a failed write"),
+        );
+        assert!(matches!(result, Err(SaveError::Failed(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert!(loaded.buffer.is_dirty());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn directory_sync_failure_reports_uncertain_durability_after_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, "original").unwrap();
+        let mut loaded = load(&path).unwrap();
+        loaded.buffer.insert("edit");
+        let snapshot = loaded.buffer.text_snapshot();
+        let result = save_with_directory_sync(
+            &path,
+            &snapshot,
+            Some(&loaded.version),
+            || {},
+            |_| Err(std::io::Error::other("injected sync failure")),
+        );
+        let Err(SaveError::Failed(message)) = result else {
+            panic!("directory sync failure must be reported")
+        };
+        assert!(message.contains("File replaced"));
+        assert!(message.contains("Durability is uncertain"));
+        let mut expected = Vec::new();
+        snapshot.write_to(&mut expected).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        assert!(loaded.buffer.is_dirty());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn same_length_external_replacement_is_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let replacement = dir.path().join("replacement");
+        fs::write(&path, "original").unwrap();
+        fs::write(&replacement, "original").unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        File::open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&replacement).unwrap().modified().unwrap(),
+            modified
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                fs::metadata(&path).unwrap().ino(),
+                fs::metadata(&replacement).unwrap().ino()
+            );
+        }
+        let loaded = load(&path).unwrap();
+        let result = save_impl(&path, &snapshot("mine"), Some(&loaded.version), || {
+            fs::rename(&replacement, &path).unwrap();
+        });
+        assert!(matches!(result, Err(SaveError::Conflict(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn delete_and_recreate_during_save_requires_new_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, "initial").unwrap();
+        let loaded = load(&path).unwrap();
+        let result = save_impl(&path, &snapshot("mine"), Some(&loaded.version), || {
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, "recreated").unwrap();
+        });
+        assert!(matches!(result, Err(SaveError::Conflict(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"recreated");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn late_readonly_or_metadata_change_is_not_silently_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, "initial").unwrap();
+        let loaded = load(&path).unwrap();
+        let result = save_impl(&path, &snapshot("mine"), Some(&loaded.version), || {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        });
+        assert!(matches!(result, Err(SaveError::Conflict(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"initial");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 

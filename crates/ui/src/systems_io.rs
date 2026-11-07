@@ -125,6 +125,19 @@ pub(crate) fn export_copy(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn export_copy_impl(path: &Path, bytes: &[u8], before_commit: impl FnOnce()) -> Result<(), String> {
+    export_with_mode(path, bytes, false, before_commit)
+}
+
+pub(crate) fn export_executable_copy(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    export_with_mode(path, bytes, true, || {})
+}
+
+fn export_with_mode(
+    path: &Path,
+    bytes: &[u8],
+    executable: bool,
+    before_commit: impl FnOnce(),
+) -> Result<(), String> {
     if bytes.len() as u64 > MAX_BINARY_BYTES {
         return Err("Exports larger than 64 MiB are not supported yet.".into());
     }
@@ -140,6 +153,18 @@ fn export_copy_impl(path: &Path, bytes: &[u8], before_commit: impl FnOnce()) -> 
     temporary
         .write_all(bytes)
         .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    if executable {
+        return Err("Executable export is supported on Linux only.".into());
+    }
     temporary.flush().map_err(|error| error.to_string())?;
     temporary
         .as_file()
