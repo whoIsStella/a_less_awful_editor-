@@ -33,6 +33,8 @@ impl Selection {
 pub enum Movement {
     Left,
     Right,
+    WordLeft,
+    WordRight,
     Up,
     Down,
     LineStart,
@@ -55,7 +57,34 @@ pub struct TextSnapshot {
     revision: u64,
 }
 
+/// Literal search is computed on immutable snapshots, independently of the UI.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SearchResults {
+    pub ranges: Vec<Range<usize>>,
+    pub total: usize,
+}
+
 impl TextSnapshot {
+    pub fn find_literal(&self, query: &str, limit: usize) -> SearchResults {
+        let mut result = SearchResults {
+            ranges: Vec::new(),
+            total: 0,
+        };
+        if query.is_empty() {
+            return result;
+        }
+        let text = self.text.to_string();
+        for (offset, matched) in text.match_indices(query) {
+            result.total += 1;
+            if result.ranges.len() < limit {
+                result.ranges.push(
+                    self.text.byte_to_char(offset)..self.text.byte_to_char(offset + matched.len()),
+                );
+            }
+        }
+        result
+    }
+
     pub fn write_to(&self, writer: impl std::io::Write) -> std::io::Result<()> {
         self.text.write_to(writer)
     }
@@ -216,6 +245,8 @@ impl EditorBuffer {
         let target = match movement {
             Movement::Left if !extend && !range.is_empty() => range.start,
             Movement::Right if !extend && !range.is_empty() => range.end,
+            Movement::WordLeft => self.word_left(caret),
+            Movement::WordRight => self.word_right(caret),
             Movement::Left => self.previous_boundary(caret),
             Movement::Right => self.next_boundary(caret),
             Movement::Up | Movement::Down => {
@@ -242,6 +273,46 @@ impl EditorBuffer {
         self.move_to(target, extend);
         if vertical {
             self.preferred_column = Some(column);
+        }
+    }
+
+    fn word_left(&self, mut offset: usize) -> usize {
+        while offset > 0 && self.text.char(offset - 1).is_whitespace() {
+            offset -= 1;
+        }
+        if offset > 0 {
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            let class = word(self.text.char(offset - 1));
+            while offset > 0 {
+                let c = self.text.char(offset - 1);
+                if c.is_whitespace() || word(c) != class {
+                    break;
+                }
+                offset -= 1;
+            }
+        }
+        self.snap_boundary(offset)
+    }
+
+    fn word_right(&self, mut offset: usize) -> usize {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        if offset < self.len_chars() && !self.text.char(offset).is_whitespace() {
+            let class = word(self.text.char(offset));
+            while offset < self.len_chars() {
+                let c = self.text.char(offset);
+                if c.is_whitespace() || word(c) != class {
+                    break;
+                }
+                offset += 1;
+            }
+        }
+        while offset < self.len_chars() && self.text.char(offset).is_whitespace() {
+            offset += 1;
+        }
+        if self.snap_boundary(offset) == offset {
+            offset
+        } else {
+            self.next_boundary(offset)
         }
     }
 
@@ -637,5 +708,49 @@ mod persistence_regressions {
         buffer.end_edit_group();
         assert!(!buffer.is_dirty());
         assert!(!buffer.undo());
+    }
+}
+
+#[cfg(test)]
+mod navigation_search_tests {
+    use super::*;
+    #[test]
+    fn literal_search_uses_scalar_offsets_and_preserves_snapshot() {
+        let mut b = EditorBuffer::with_text("λ🙂 x\r\nλ🙂");
+        let snapshot = b.text_snapshot();
+        b.insert("changed");
+        let found = snapshot.find_literal("λ🙂", 10);
+        assert_eq!(found.ranges, vec![0..2, 6..8]);
+        assert_eq!(found.total, 2);
+        assert_eq!(snapshot.find_literal("", 10).total, 0);
+        assert_eq!(snapshot.find_literal("missing", 10).total, 0);
+        assert_eq!(snapshot.find_literal("\r\n", 10).ranges, vec![4..6]);
+    }
+    #[test]
+    fn match_storage_is_bounded_without_losing_total() {
+        let b = EditorBuffer::with_text("aaaa");
+        assert_eq!(
+            b.text_snapshot().find_literal("a", 2),
+            SearchResults {
+                ranges: vec![0..1, 1..2],
+                total: 4
+            }
+        );
+        assert_eq!(b.text_snapshot().find_literal("a", 0).total, 4);
+    }
+    #[test]
+    fn word_navigation_preserves_unicode_and_selection() {
+        let mut b = EditorBuffer::with_text("foo_bar λambda 👩‍💻 end");
+        let original = b.text_in_range(0..b.len_chars());
+        b.move_cursor(Movement::WordRight, false);
+        assert_eq!(b.selection().head, 8);
+        b.move_cursor(Movement::WordRight, true);
+        assert_eq!(b.selected_text(), "λambda ");
+        b.move_cursor(Movement::WordRight, false);
+        assert_eq!(b.selection().head, 19);
+        b.move_cursor(Movement::WordLeft, false);
+        assert_eq!(b.selection().head, 15);
+        assert_eq!(b.text_in_range(0..b.len_chars()), original);
+        assert!(!b.is_dirty());
     }
 }

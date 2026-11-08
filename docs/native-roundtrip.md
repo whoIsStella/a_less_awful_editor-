@@ -22,22 +22,23 @@ editor. This path currently requires Linux and x86-64 ELF output.
    location opens its instruction in **Assembly**; **Bytes** shows its bytes.
 3. Select the function to replace, open **Pseudocode**, then **Decompile**.
 4. Choose **Edit recovered C**. The recovered text opens as a separate text
-   document. Existing unsaved text gets the normal Save/Discard/Cancel prompt.
+   document. Existing text stays in its tab with its unsaved edits.
 5. Edit the function. Preserve its name and review the original calling
    convention, parameter types, return type and effects. The compiler accepts
    basic Ghidra scalar type aliases, but does not recover or verify the ABI.
    Use Save As to retain the recovered/edited C separately.
 6. For a replacement that needs more space or supported calls and data, switch
-   **Allow relocated: Off** to **Allow relocated: On**. Leave it off for the
-   fixed-span path, then click **Compile C**. The result is a preview, not an immediate binary mutation.
-   Diagnostics explain refused inputs. **Cancel compile** stops an active job.
+   **Binary → Relocated Replacement** on. The status message reports the mode.
+   Leave it off for the fixed-span path, then choose **Binary → Compile Recovered C / Cancel**.
+   The result is a preview, not an immediate binary mutation. The same menu item
+   cancels an active compile. Diagnostics explain refused inputs.
 7. Review the instructions and **Apply replacement**. In relocated mode, review the
    entry, body, added sections, relocations and warnings; **View body** shows
    the replacement instructions. The edit is applied in memory;
    binary undo/redo remains available. Changing source invalidates its preview;
    compile again after an edit. After a binary patch, undo or redo, decompile
    the current binary and choose **Edit recovered C** again before compiling.
-8. **Export copy** to a new destination. A compiled native replacement exports
+8. **Binary → Export Copy** to a new destination. A compiled native replacement exports
    with owner-only read/write/execute permissions (0700). The editor does not
    run the result. Existing destinations and the original binary are not replaced.
 9. Reopen the exported binary to inspect the changed code. For a relocated
