@@ -12,18 +12,6 @@ still ahead. They are not features you can use today.
 
 ## What works now
 
-- Multiple text tabs with independent edits, selection and undo history.
-- File, Edit, View, Navigate, Terminal and Binary menus visible inside the window,
-  including on Linux. Small controls. No copy buttons or placeholder tool panels.
-- UTF-8 editing, literal Find, Go to Line and word navigation.
-- A folder tree and a Linux PTY terminal with keyboard focus switching.
-- ELF, PE and Mach-O inspection with linked assembly, bytes, symbols and strings.
-- x86/x86-64 control flow and call navigation; source navigation where DWARF permits.
-- Instruction and byte patch previews, undo and export to a separate file.
-- Optional native decompilation and editable recovered C.
-- Preview and export of supported standalone C function replacements in named
-  Linux x86-64 ELF functions.
-
 Binary inspection does not execute the input. Patches stay in memory until you
 export a separate copy. Recovered code is an approximation, not original source.
 
@@ -46,9 +34,7 @@ cargo run --locked -p a-less-awful-editor -- --folder .
 A plain path opens text. Use `--binary` for executable files or raw bytes,
 and `--folder` for the Files sidebar. Relative paths use the launch directory;
 quote paths containing spaces. Use `-- --name.c` for a text filename beginning
-with `-`. Opening a file does not select a project, start a shell, or run a
-toolchain. Folder browsing lists the selected directory and expands children
-on demand. Binary inspection never runs the input file.
+with `-`.
 
 Run with `--help` for usage without a graphical session. Invalid arguments
 exit with status 2. Missing files, unsupported inputs, and read failures appear
@@ -97,7 +83,7 @@ Ctrl+Shift+V pastes. Restart and Stop live in the Terminal menu.
 
 Opening a folder does not run anything. Run your build command yourself.
 
-## Limits
+## Limits: TODO
 
 Up to 32 text documents per window, 16 MiB per input text file and 64 MiB per
 binary. Text must be regular UTF-8. Symlink paths are rejected. Saving over an
