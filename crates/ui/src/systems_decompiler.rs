@@ -215,11 +215,6 @@ impl Workbench {
                     button("Edit recovered C")
                         .on_click(cx.listener(|this, _, _, cx| this.edit_recovered_c(cx))),
                 )
-                .child(button("Copy code").on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(result) = &this.decompiler.result {
-                        cx.write_to_clipboard(ClipboardItem::new_string(result.text.clone()));
-                    }
-                })))
                 .child(
                     div()
                         .flex_1()

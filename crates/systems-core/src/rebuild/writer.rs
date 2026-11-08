@@ -190,7 +190,7 @@ pub(super) fn write_candidate_with_cancel(
     if old_symbols.len() % 24 != 0 || local_count == 0 || local_count > old_symbols.len() / 24 {
         return Err(invalid("Invalid local symbol boundary"));
     }
-    for (i, symbol) in old_symbols.chunks_exact(24).enumerate() {
+    for (i, symbol) in old_symbols.as_chunks::<24>().0.iter().enumerate() {
         let local = symbol[4] >> 4 == 0;
         if local != (i < local_count) {
             return Err(invalid("Invalid static symbol ordering"));

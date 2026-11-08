@@ -479,19 +479,15 @@ fn shell_close_checks_text_then_binary_and_cancel_retains_both(cx: &mut TestAppC
     let patched = update(&workbench, cx, |workbench, _| {
         workbench.image.bytes().to_vec()
     });
-    for action in [false, true] {
-        if action {
-            cx.dispatch_action(crate::Quit);
-        } else {
-            cx.dispatch_action(crate::Close);
-        }
+    for _ in 0..2 {
+        cx.dispatch_action(crate::Quit);
         assert!(cx.pending_prompt().unwrap().0.contains("Save changes"));
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         assert_eq!(text_state(&shell, cx), ("keep text".into(), true));
         update(&workbench, cx, |workbench, _| assert!(workbench.is_dirty()));
     }
-    cx.dispatch_action(crate::Close);
+    cx.dispatch_action(crate::Quit);
     cx.simulate_prompt_answer("Save");
     cx.run_until_parked();
     cx.simulate_new_path_selection(|_| None);
@@ -508,7 +504,7 @@ fn shell_close_checks_text_then_binary_and_cancel_retains_both(cx: &mut TestAppC
         assert!(state.close_text_revision.is_none());
         assert!(state.close_binary_revision.is_none());
     });
-    cx.dispatch_action(crate::Close);
+    cx.dispatch_action(crate::Quit);
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
     assert!(cx.pending_prompt().unwrap().0.contains("Export binary"));
@@ -516,7 +512,7 @@ fn shell_close_checks_text_then_binary_and_cancel_retains_both(cx: &mut TestAppC
     cx.run_until_parked();
     assert_eq!(text_state(&shell, cx), ("keep text".into(), true));
     update(&workbench, cx, |workbench, _| assert!(workbench.is_dirty()));
-    cx.dispatch_action(crate::Close);
+    cx.dispatch_action(crate::Quit);
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
     cx.simulate_prompt_answer("Export copy");
@@ -565,7 +561,7 @@ fn emit_source(
 }
 
 #[gpui::test]
-fn source_navigation_reuses_dirty_matching_buffer_and_guards_replacement(cx: &mut TestAppContext) {
+fn source_navigation_reuses_dirty_matching_buffer_and_retains_other_tabs(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.c");
     let other = directory.path().join("other.c");
@@ -592,13 +588,17 @@ fn source_navigation_reuses_dirty_matching_buffer_and_guards_replacement(cx: &mu
         assert_eq!(shell.read(cx).editor.read(cx).cursor().line, 2);
     });
     emit_source(&workbench, &other, 2, cx);
-    assert!(cx.has_pending_prompt());
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert_eq!(text_state(&shell, cx), before);
-    emit_source(&workbench, &other, 2, cx);
-    cx.simulate_prompt_answer("Discard");
-    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    cx.update(|_, cx| {
+        let s = shell.read(cx);
+        let retained = s
+            .documents
+            .iter()
+            .find(|d| d.path.as_ref() == Some(&source))
+            .unwrap();
+        assert_eq!(retained.editor.read(cx).text(), before.0);
+        assert!(retained.editor.read(cx).is_dirty());
+    });
     assert_eq!(text_state(&shell, cx), ("other\nsource\n".into(), false));
     cx.update(|_, cx| {
         assert_eq!(shell.read(cx).path.as_ref(), Some(&other));
@@ -791,7 +791,7 @@ fn edits_during_binary_export_require_another_close_decision(cx: &mut TestAppCon
     let captured = update(&workbench, cx, |workbench, _| {
         workbench.image.bytes().to_vec()
     });
-    cx.dispatch_action(crate::Close);
+    cx.dispatch_action(crate::Quit);
     cx.simulate_prompt_answer("Export copy");
     cx.run_until_parked();
     cx.simulate_new_path_selection(|_| Some(output.clone()));
@@ -838,7 +838,7 @@ fn hidden_text_edit_during_binary_close_prompt_requires_new_text_decision(cx: &m
     cx.simulate_input("original text");
     let workbench = load_binary(&shell, directory.path().join("fixture.bin"), cx);
     patch(&workbench, "90", cx);
-    cx.dispatch_action(crate::Close);
+    cx.dispatch_action(crate::Quit);
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
     assert!(cx.pending_prompt().unwrap().0.contains("Export binary"));
@@ -884,7 +884,7 @@ fn unchanged_text_discard_then_binary_export_does_not_repeat_text_prompt(cx: &mu
     let expected = update(&workbench, cx, |workbench, _| {
         workbench.image.bytes().to_vec()
     });
-    cx.dispatch_action(crate::Close);
+    cx.dispatch_action(crate::Quit);
     cx.simulate_prompt_answer("Discard");
     cx.run_until_parked();
     assert!(cx.pending_prompt().unwrap().0.contains("Export binary"));
@@ -1027,4 +1027,30 @@ fn native_window_close_still_guards_dirty_text_and_binary_after_deferral(cx: &mu
         assert!(workbench.is_dirty());
         assert_eq!(workbench.image.bytes()[0], 0x90);
     });
+}
+
+#[gpui::test]
+fn close_binary_preserves_text_and_keyboard_undo_redo(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let (shell, cx) = cx.add_window_view(crate::AppShell::new);
+    cx.simulate_input("retained text");
+    let workbench = load_binary(&shell, directory.path().join("fixture.bin"), cx);
+    patch(&workbench, "90", cx);
+    cx.dispatch_action(crate::ShowAssembly);
+    cx.simulate_keystrokes("ctrl-z");
+    update(&workbench, cx, |w, _| {
+        assert_eq!(w.image.bytes(), fixture().bytes())
+    });
+    cx.simulate_keystrokes("ctrl-shift-z");
+    update(&workbench, cx, |w, _| assert_eq!(w.image.bytes()[0], 0x90));
+    cx.dispatch_action(crate::Close);
+    assert!(cx.pending_prompt().unwrap().0.contains("Export binary"));
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    cx.update(|_, cx| assert!(shell.read(cx).workbench.is_some()));
+    cx.dispatch_action(crate::Close);
+    cx.simulate_prompt_answer("Discard patches");
+    cx.run_until_parked();
+    cx.update(|_, cx| assert!(shell.read(cx).workbench.is_none()));
+    assert_eq!(text_state(&shell, cx), ("retained text".into(), true));
 }

@@ -26,6 +26,11 @@ pub(crate) fn init_keymap(cx: &mut App) {
     }
     cx.bind_keys(
         [
+            "ctrl-n",
+            "ctrl-f",
+            "ctrl-g",
+            "f3",
+            "shift-f3",
             "ctrl-o",
             "ctrl-shift-o",
             "ctrl-1",
@@ -252,6 +257,16 @@ impl Terminal {
         .detach();
         view
     }
+    pub(crate) fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start();
+        self.focus.focus(window);
+        cx.notify();
+    }
+    pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
+        self.session = None;
+        self.message = "Shell stopped".into();
+        cx.notify();
+    }
     fn start(&mut self) {
         self.session = None;
         self.directory = self.restart_directory.clone();
@@ -450,32 +465,7 @@ impl Render for Terminal {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(self.directory.display().to_string())
-                    .child(
-                        crate::systems::button("Restart shell").on_click(cx.listener(
-                            |this, _, window, cx| {
-                                this.start();
-                                this.focus.focus(window);
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(crate::systems::button("Stop").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.session = None;
-                            this.message = "Shell stopped".into();
-                            cx.notify();
-                        },
-                    )))
-                    .child(crate::systems::button("Copy screen").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            if let Some(s) = &this.session {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    s.state.lock().unwrap().parser.screen().contents(),
-                                ));
-                            }
-                        },
-                    ))),
+                    .child(self.directory.display().to_string()),
             )
             .child(
                 div().flex_1().min_h_0().overflow_hidden().child(

@@ -1,8 +1,9 @@
 mod cli;
 
 use ale_ui::{
-    AppShell, Close, InspectBinary, Open, OpenFolder, Quit, Save, SaveAs, ShowAssembly, ShowBytes,
-    ShowEditor, ShowOverview, TogglePanels,
+    AppShell, Close, Find, FindNext, FindPrevious, FocusEditor, FocusTerminal, GoToLine,
+    InspectBinary, NewDocument, NextDocument, Open, OpenFolder, OpenMenu, Quit, Save, SaveAs,
+    ShowAssembly, ShowBytes, ShowEditor, ShowOverview, TogglePanels,
 };
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
@@ -30,6 +31,15 @@ fn main() {
             "ctrl"
         };
         cx.bind_keys([
+            KeyBinding::new(&format!("{modifier}-n"), NewDocument, None),
+            KeyBinding::new(&format!("{modifier}-f"), Find, None),
+            KeyBinding::new(&format!("{modifier}-g"), GoToLine, None),
+            KeyBinding::new("f3", FindNext, None),
+            KeyBinding::new("shift-f3", FindPrevious, None),
+            KeyBinding::new(&format!("{modifier}-alt-e"), FocusEditor, None),
+            KeyBinding::new(&format!("{modifier}-alt-t"), FocusTerminal, None),
+            KeyBinding::new(&format!("{modifier}-tab"), NextDocument, None),
+            KeyBinding::new("f10", OpenMenu, None),
             KeyBinding::new(&format!("{modifier}-o"), Open, None),
             KeyBinding::new(&format!("{modifier}-shift-o"), InspectBinary, None),
             KeyBinding::new(&format!("{modifier}-1"), ShowEditor, None),
@@ -46,6 +56,7 @@ fn main() {
         cx.set_menus(vec![Menu {
             name: "File".into(),
             items: vec![
+                MenuItem::action("New File", NewDocument),
                 MenuItem::action("Open", Open),
                 MenuItem::action("Open Folder", OpenFolder),
                 MenuItem::action("Inspect binary", InspectBinary),

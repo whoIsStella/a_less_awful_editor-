@@ -756,7 +756,7 @@ fn validate_pie_identity(bytes: &[u8], headers: &[ProgramHeader]) -> Result<(), 
         .ok_or_else(bad)?;
     let mut flags = None;
     let mut terminated = false;
-    for record in data.chunks_exact(16) {
+    for record in data.as_chunks::<16>().0.iter() {
         let tag = u64::from_le_bytes(record[..8].try_into().map_err(|_| bad())?);
         let value = u64::from_le_bytes(record[8..].try_into().map_err(|_| bad())?);
         if tag == 0 {

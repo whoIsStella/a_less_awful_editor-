@@ -190,7 +190,7 @@ pub(super) fn inspect_dynamic(
         dynsym.unwrap_or((usize::MAX, &[], 0, 0, 0));
     let symbol_count = symbols.len() / 24;
     let mut sizes = Vec::with_capacity(symbol_count);
-    for s in symbols.chunks_exact(24) {
+    for s in symbols.as_chunks::<24>().0.iter() {
         sizes.push(u64::from_le_bytes(
             s[16..24]
                 .try_into()
@@ -273,7 +273,7 @@ pub(super) fn inspect_dynamic(
     }
     let mut tags = Tags::default();
     let mut terminated = false;
-    for d in data.chunks_exact(16) {
+    for d in data.as_chunks::<16>().0.iter() {
         let tag = u64::from_le_bytes(
             d[..8]
                 .try_into()

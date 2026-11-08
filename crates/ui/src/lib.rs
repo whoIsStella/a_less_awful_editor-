@@ -1,4 +1,6 @@
+mod commands;
 mod decompiler;
+mod documents;
 mod explorer;
 mod persistence;
 pub mod prompts;
@@ -48,7 +50,16 @@ actions!(
         ShowAssembly,
         ShowBytes,
         ShowOverview,
-        TogglePanels
+        TogglePanels,
+        NewDocument,
+        Find,
+        FindNext,
+        FindPrevious,
+        GoToLine,
+        FocusEditor,
+        FocusTerminal,
+        NextDocument,
+        OpenMenu
     ]
 );
 
@@ -64,13 +75,12 @@ enum Intent {
     Source(Box<Loaded>, usize),
     RecoveredC(String, ReplacementTarget),
     Close,
+    CloseDocument,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
     Terminal,
-    Problems,
-    Debug,
     Output,
 }
 
@@ -78,8 +88,6 @@ impl Panel {
     fn label(self) -> &'static str {
         match self {
             Self::Terminal => "TERMINAL",
-            Self::Problems => "PROBLEMS",
-            Self::Debug => "DEBUG CONSOLE",
             Self::Output => "OUTPUT",
         }
     }
@@ -87,17 +95,17 @@ impl Panel {
     fn message(self) -> &'static str {
         match self {
             Self::Terminal => "Select Terminal to start a shell.",
-            Self::Problems => "Language diagnostics are not connected yet.",
-            Self::Debug => "No debug adapter is connected. Debugging is not implemented yet.",
-            Self::Output => {
-                "Single-file editing. Open: Ctrl+O | Save: Ctrl+S | Save As: Ctrl+Shift+S"
-            }
+            Self::Output => "Open: Ctrl+O | Find: Ctrl+F | Go to line: Ctrl+G | Menus: F10",
         }
     }
 }
 
 pub struct AppShell {
     editor: Entity<EditorView>,
+    documents: Vec<documents::Document>,
+    document_order: Vec<gpui::EntityId>,
+    quit_approvals: Vec<(gpui::EntityId, u64)>,
+    commands: commands::CommandState,
     panel: Panel,
     terminal: Option<Entity<terminal::Terminal>>,
     explorer_visible: bool,
@@ -158,6 +166,11 @@ impl AppShell {
         let editor = cx.new(|cx| EditorView::new("", cx));
         editor.read(cx).focus_handle(cx).focus(window);
         cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+        let commands = commands::CommandState::new(cx);
+        cx.subscribe_in(&commands.input, window, |this, _, _, window, cx| {
+            this.run_command_input(window, cx)
+        })
+        .detach();
         let shell = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             // GPUI 0.2.2's X11 close callback still holds the platform state
@@ -174,7 +187,11 @@ impl AppShell {
             false
         });
         Self {
+            document_order: vec![editor.entity_id()],
             editor,
+            documents: Vec::new(),
+            quit_approvals: Vec::new(),
+            commands,
             panel: Panel::Output,
             terminal: None,
             explorer_visible: false,
@@ -225,6 +242,7 @@ impl AppShell {
         self.binary_pending = None;
         self.close_text_revision = None;
         self.close_binary_revision = None;
+        self.quit_approvals.clear();
         self.finish(message, window, cx);
     }
 
@@ -363,7 +381,7 @@ impl AppShell {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok(loaded) => this.request_replace(Intent::Open(Box::new(loaded)), window, cx),
+                    Ok(loaded) => this.open_document(loaded, None, window, cx),
                     Err(error) => this.failure(format!("Open failed: {error}"), window, cx),
                 }
             });
@@ -417,10 +435,8 @@ impl AppShell {
 
     fn apply_intent(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
-            Intent::Close => {
-                self.close_text_revision = Some(self.editor.read(cx).content_revision());
-                self.request_binary_replace(BinaryIntent::Close, window, cx);
-            }
+            Intent::Close => self.continue_quit(window, cx),
+            Intent::CloseDocument => self.discard_active_document(window, cx),
             Intent::RecoveredC(text, target) => {
                 if !self.workbench.as_ref().is_some_and(|w| {
                     w.entity_id() == target.workbench
@@ -540,6 +556,18 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .documents
+            .iter()
+            .any(|d| d.path.as_ref() == Some(&path))
+        {
+            self.failure(
+                "That file is already open in another tab. Switch to its tab to save it.",
+                window,
+                cx,
+            );
+            return;
+        }
         self.trace_save(cx, SaveTraceEvent::WriteStarted { observation });
         self.status = "Saving snapshot...".into();
         cx.notify();
@@ -592,7 +620,9 @@ impl AppShell {
                                 Intent::Source(loaded, line) => {
                                     this.reload_for_open(loaded.path, Some(line), window, cx)
                                 }
-                                intent @ (Intent::Close | Intent::RecoveredC(..)) => {
+                                intent @ (Intent::Close
+                                | Intent::CloseDocument
+                                | Intent::RecoveredC(..)) => {
                                     this.request_replace(intent, window, cx)
                                 }
                             }
@@ -783,43 +813,66 @@ impl Render for AppShell {
         } else {
             px(104.0)
         };
-        let tabs = [
-            Panel::Terminal,
-            Panel::Problems,
-            Panel::Debug,
-            Panel::Output,
-        ]
-        .into_iter()
-        .map(|panel| {
-            let active = panel == self.panel;
-            let label = match panel {
-                Panel::Terminal => "Terminal",
-                Panel::Problems => "Problems",
-                Panel::Debug => "Debug",
-                Panel::Output => "Output",
-            };
-            div()
-                .id(panel.label())
-                .px_3()
-                .h_full()
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .text_size(px(11.0))
-                .text_color(rgb(if active { 0xd4dce7 } else { 0x8590a3 }))
-                .border_b_1()
-                .border_color(rgb(if active { 0x7aa2f7 } else { 0x15191f }))
-                .child(label)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.panel = panel;
-                    if panel == Panel::Terminal {
-                        this.show_terminal(window, cx);
-                    }
-                    cx.notify();
-                }))
-        })
-        .collect::<Vec<_>>();
+        let tabs = [Panel::Terminal, Panel::Output]
+            .into_iter()
+            .map(|panel| {
+                let active = panel == self.panel;
+                let label = match panel {
+                    Panel::Terminal => "Terminal",
+                    Panel::Output => "Output",
+                };
+                div()
+                    .id(panel.label())
+                    .px_3()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(rgb(if active { 0xd4dce7 } else { 0x8590a3 }))
+                    .border_b_1()
+                    .border_color(rgb(if active { 0x7aa2f7 } else { 0x15191f }))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.panel = panel;
+                        if panel == Panel::Terminal {
+                            this.show_terminal(window, cx);
+                        }
+                        cx.notify();
+                    }))
+            })
+            .collect::<Vec<_>>();
         div()
+            .on_action(cx.listener(|this, _: &NewDocument, window, cx| {
+                if this.fresh_document(cx) {
+                    this.show_editor(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Find, window, cx| {
+                this.open_bar(commands::Bar::Find, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToLine, window, cx| {
+                this.open_bar(commands::Bar::Line, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_match(false, cx)))
+            .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.find_match(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusEditor, window, cx| this.show_editor(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusTerminal, window, cx| this.show_terminal(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &NextDocument, window, cx| {
+                this.next_document(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenMenu, window, cx| this.open_menu(0, window, cx)))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.commands.bar.is_some() {
+                    this.dismiss_transient(cx);
+                    this.focus_active(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &Open, window, cx| this.request_open(window, cx)))
             .on_action(
                 cx.listener(|this, _: &OpenFolder, window, cx| this.choose_folder(window, cx)),
@@ -847,9 +900,7 @@ impl Render for AppShell {
                 this.panels_visible = !this.panels_visible;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Close, window, cx| {
-                this.request_replace(Intent::Close, window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &Close, window, cx| this.close_document(window, cx)))
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 this.request_replace(Intent::Close, window, cx)
             }))
@@ -861,129 +912,23 @@ impl Render for AppShell {
             .text_size(px(12.0))
             .bg(rgb(0x101216))
             .text_color(rgb(0xd4dce7))
-            .child(
-                div()
-                    .h(px(28.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .px_3()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(rgb(0x2a313c))
-                    .bg(rgb(0x15191f))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .text_color(rgb(0x8590a3))
-                            .child("A Less Awful Editor"),
-                    )
-                    .child(
-                        systems::button("Files").on_click(cx.listener(|this, _, _, cx| {
-                            this.explorer_visible = !this.explorer_visible;
-                            cx.notify();
-                        })),
-                    )
-                    .child(systems::button("Open Folder").on_click(
-                        cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
-                    ))
-                    .child(
-                        systems::button("Open").on_click(
-                            cx.listener(|this, _, window, cx| this.request_open(window, cx)),
-                        ),
-                    )
-                    .child(systems::button("Inspect").on_click(
-                        cx.listener(|this, _, window, cx| this.request_inspect(window, cx)),
-                    ))
-                    .child(systems::button("Save").on_click(
-                        cx.listener(|this, _, window, cx| this.save_active(false, window, cx)),
-                    ))
-                    .when(self.replacement_target.is_some(), |v| {
-                        let enabled=self.workbench.as_ref().is_some_and(|w|w.read(cx).relocated_mode());
-                        v.child(systems::button(if enabled {"Allow relocated: On"}else{"Allow relocated: Off"})
-                            .when(enabled,|button|button.bg(rgb(0x1b2028)).text_color(rgb(0xe0af68)))
-                            .on_click(cx.listener(|this,_,_,cx| {
-                                if let Some(workbench)=this.workbench.clone() {workbench.update(cx,|w,cx|w.toggle_relocated_mode(cx));}
-                                this.status="Relocation is opt-in: supported x86-64 Linux executables; no external imports, TLS or new mutable storage.".into();
-                                cx.notify();
-                            })))
-                    })
-                    .when(self.replacement_target.is_some(), |v| {
-                        v.child(
-                            systems::button(
-                                if self
-                                    .workbench
-                                    .as_ref()
-                                    .is_some_and(|w| w.read(cx).is_compiling())
-                                {
-                                    "Cancel compile"
-                                } else {
-                                    "Compile C"
-                                },
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.compile_replacement(cx))),
-                        )
-                    })
-                    .child(systems::button("Terminal").on_click(
-                        cx.listener(|this, _, window, cx| this.show_terminal(window, cx)),
-                    ))
-                    .child(
-                        systems::button("Panels")
-                            .when(self.panels_visible, |button| {
-                                button.bg(rgb(0x1b2028)).text_color(rgb(0xd4dce7))
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.panels_visible = !this.panels_visible;
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .relative()
+            .child(self.menu_bar(cx))
+            .when_some(self.commands.bar, |root, bar| {
+                root.child(self.command_bar(bar))
+            })
             .child(
                 div()
                     .h(px(30.0))
                     .flex_shrink_0()
                     .flex()
                     .min_w_0()
-                    .overflow_hidden()
+                    .id("document-tabs")
+                    .overflow_x_scroll()
                     .border_b_1()
                     .border_color(rgb(0x2a313c))
                     .bg(rgb(0x15191f))
-                    .child(
-                        div()
-                            .id("text-document-tab")
-                            .h_full()
-                            .min_w_0()
-                            .max_w(px(240.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .border_b_1()
-                            .border_color(rgb(0x2a313c))
-                            .text_color(rgb(0x8590a3))
-                            .when(!self.systems_active, |tab| {
-                                tab.bg(rgb(0x1b2028))
-                                    .border_color(rgb(0x7aa2f7))
-                                    .text_color(rgb(0xd4dce7))
-                            })
-                            .child(div().min_w_0().truncate().child(text_name))
-                            .when(text_dirty, |tab| {
-                                tab.child(
-                                    div()
-                                        .size(px(5.0))
-                                        .flex_shrink_0()
-                                        .rounded_full()
-                                        .bg(rgb(0x7aa2f7)),
-                                )
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.show_editor(window, cx)),
-                            ),
-                    )
+                    .children(self.document_tabs(cx))
                     .when_some(binary, |bar, (name, dirty, _)| {
                         bar.child(
                             div()
@@ -1128,6 +1073,9 @@ impl Render for AppShell {
                     )
                     .child(div().max_w(px(220.0)).min_w_0().truncate().child(location)),
             )
+            .when_some(self.commands.menu, |root, index| {
+                root.child(self.menu_popup(index, cx))
+            })
     }
 }
 
@@ -1199,22 +1147,6 @@ impl AppShell {
             .border_color(rgb(0x2a313c))
             .bg(rgb(0x15191f))
             .child(div().px_3().py_2().text_color(rgb(0xd4dce7)).child("Files"))
-            .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(systems::button("Open Folder").on_click(
-                        cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
-                    ))
-                    .when(self.explorer_tree.root.is_some(), |view| {
-                        view.child(systems::button("Refresh").on_click(cx.listener(
-                            |this, _, window, cx| {
-                                let paths = this.explorer_tree.refresh();
-                                this.load_folders(paths, window, cx);
-                            },
-                        )))
-                    }),
-            )
             .when(self.explorer_tree.root.is_none(), |view| {
                 view.child(
                     div()
@@ -1309,7 +1241,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn direct_open_failures_and_cancel_preserve_document(cx: &mut TestAppContext) {
+    fn direct_open_failures_preserve_document_and_success_retains_tab(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let invalid = dir.path().join("invalid.txt");
         let valid = dir.path().join("valid.txt");
@@ -1339,9 +1271,9 @@ mod tests {
             })
         });
         cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Cancel");
-        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(contents(&shell, cx).0, b"replacement");
+        cx.dispatch_action(NextDocument);
         assert_eq!(contents(&shell, cx), before);
     }
 

@@ -6,6 +6,7 @@ use systems::WorkbenchEvent;
 pub(super) enum BinaryIntent {
     Open(PathBuf, Box<BinaryImage>),
     Close,
+    CloseDocument,
 }
 
 impl AppShell {
@@ -166,6 +167,7 @@ impl AppShell {
         }
         if let Some(workbench) = &self.workbench {
             if workbench.read(cx).is_busy() {
+                self.quit_approvals.clear();
                 self.close_text_revision = None;
                 self.close_binary_revision = None;
                 self.status =
@@ -221,6 +223,11 @@ impl AppShell {
     ) {
         match intent {
             BinaryIntent::Close => cx.quit(),
+            BinaryIntent::CloseDocument => {
+                self.workbench = None;
+                self.replacement_target = None;
+                self.show_editor(window, cx);
+            }
             BinaryIntent::Open(path, image) => {
                 self.replacement_target = None;
                 let workbench = cx.new(|cx| Workbench::new(path, *image, cx));
@@ -232,20 +239,17 @@ impl AppShell {
                         WorkbenchEvent::Source(location) => {
                             this.request_source(location.clone(), window, cx)
                         }
-                        WorkbenchEvent::Export => this.request_export(window, cx),
                         WorkbenchEvent::RecoveredC {
                             text,
                             site,
                             revision,
-                        } => this.request_replace(
-                            Intent::RecoveredC(
-                                text.clone(),
-                                ReplacementTarget {
-                                    workbench: workbench.entity_id(),
-                                    binary_revision: *revision,
-                                    site: site.clone(),
-                                },
-                            ),
+                        } => this.open_recovered_document(
+                            text.clone(),
+                            ReplacementTarget {
+                                workbench: workbench.entity_id(),
+                                binary_revision: *revision,
+                                site: site.clone(),
+                            },
                             window,
                             cx,
                         ),
@@ -294,9 +298,7 @@ impl AppShell {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok(loaded) => {
-                        this.request_replace(Intent::Source(Box::new(loaded), line), window, cx)
-                    }
+                    Ok(loaded) => this.open_document(loaded, Some(line), window, cx),
                     Err(error) => this.failure(
                         format!("Source unavailable: {error}. Binary retained."),
                         window,

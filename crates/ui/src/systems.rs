@@ -75,7 +75,6 @@ impl Command {
 }
 pub(crate) enum WorkbenchEvent {
     Source(SourceLocation),
-    Export,
     RecoveredC {
         text: String,
         site: ale_systems_core::recompile::ReplacementSite,
@@ -296,6 +295,37 @@ pub(crate) fn button(label: impl Into<gpui::SharedString>) -> Stateful<Div> {
 }
 
 impl Workbench {
+    pub(crate) fn edit_command(
+        &mut self,
+        command: ale_editor_view::EditCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ale_editor_view::EditCommand;
+        if self.input.read(cx).focus_handle(cx).is_focused(window) {
+            self.input
+                .update(cx, |input, cx| input.edit_command(command, cx));
+            return;
+        }
+        match command {
+            EditCommand::Undo => self.history(false, cx),
+            EditCommand::Redo => self.history(true, cx),
+            EditCommand::Copy => {
+                let text = if matches!(self.lens, Lens::Pseudocode) {
+                    self.decompiler.result.as_ref().map(|r| r.text.clone())
+                } else if let Some(Preview::Bytes { bytes, .. }) = &self.preview {
+                    Some(hex(bytes))
+                } else {
+                    None
+                };
+                if let Some(text) = text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn new(path: PathBuf, image: BinaryImage, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| EditorView::input("", cx));
         cx.subscribe(&input, |this, _, _: &ale_editor_view::Submit, cx| {
@@ -1246,7 +1276,25 @@ impl Render for Workbench {
                         }),
                 ),
         };
-        div().track_focus(&self.focus).size_full().flex().flex_col().min_h_0().font_family("Inter")
+        div().track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                let key = &event.keystroke;
+                if (key.modifiers.control || key.modifiers.platform) && !key.modifiers.alt {
+                    use ale_editor_view::EditCommand;
+                    let command = match key.key.as_str() {
+                        "z" if key.modifiers.shift => Some(EditCommand::Redo),
+                        "z" => Some(EditCommand::Undo),
+                        "y" => Some(EditCommand::Redo),
+                        "c" => Some(EditCommand::Copy),
+                        _ => None,
+                    };
+                    if let Some(command) = command {
+                        this.edit_command(command, window, cx);
+                        cx.stop_propagation();
+                    }
+                }
+            }))
+            .size_full().flex().flex_col().min_h_0().font_family("Inter")
             .bg(rgb(0x101216)).text_size(px(12.0)).text_color(rgb(0xd4dce7))
             .child(div().flex().items_center().h(px(30.0)).flex_shrink_0().px_2()
                 .bg(rgb(0x15191f)).border_b_1().border_color(rgb(0x2a313c))
@@ -1306,19 +1354,15 @@ impl Render for Workbench {
                             this.input.read(cx).focus_handle(cx).focus(window); cx.notify(); }))
                 }))
                 .child(div().flex_1())
-                .child(button("Undo").on_click(cx.listener(|this, _, _, cx| this.history(false, cx))))
-                .child(button("Redo").on_click(cx.listener(|this, _, _, cx| this.history(true, cx))))
-                .child(button("Export copy").text_color(rgb(0x7aa2f7)).on_click(cx.listener(|_, _, _, cx| cx.emit(WorkbenchEvent::Export)))))
+)
             .child(div().flex().items_center().h(px(30.0)).flex_shrink_0().px_3().gap_2().bg(rgb(0x15191f))
                 .child(div().text_color(rgb(0x7aa2f7)).child("›"))
                 .child(div().flex_1().min_w_0().h(px(25.0)).child(self.input.clone()))
-                .child(button(if self.busy { "Working…" } else { "Run" }).text_color(rgb(0x7aa2f7))
-                    .on_click(cx.listener(|this, _, _, cx| this.run(cx)))))
+                .child(div().text_size(px(11.0)).text_color(rgb(0x8590a3)).child(if self.busy { "Working…" } else { "Enter to run" })))
             .when_some(self.preview.as_ref().and_then(|preview|match preview {Preview::Bytes {bytes,..}=>Some(hex(bytes)),_=>None}), |root, bytes| root.child(
                 div().flex().items_center().gap_2().h(px(30.0)).flex_shrink_0().px_3().bg(rgb(0x1c2a3d))
                     .child(div().text_size(px(11.0)).text_color(rgb(0x8590a3)).child("PREVIEW"))
                     .child(div().flex_1().min_w_0().truncate().font_family("DejaVu Sans Mono").text_size(px(12.0)).text_color(rgb(0x7dcfff)).child(bytes.clone()))
-                    .child(button("Copy bytes").on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(bytes.clone())))))
                     .child(button("Apply patch").bg(rgb(0x7aa2f7)).text_color(rgb(0x101216)).on_click(cx.listener(|this, _, _, cx| this.apply_patch(cx))))))
             .when_some(self.preview.as_ref().and_then(|preview|match preview {Preview::Native {plan,compiler_identity,..}=>Some((native_preview_text(plan,compiler_identity),native_body_text(plan))),_=>None}), |root, (summary,body)| root.child(
                 div().flex().flex_col().flex_shrink_0().px_3().py_1().bg(rgb(0x1c2a3d)).gap_1()
