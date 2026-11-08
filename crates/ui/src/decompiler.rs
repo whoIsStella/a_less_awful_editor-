@@ -240,6 +240,24 @@ fn run_worker(
 }
 
 #[cfg(target_os = "linux")]
+fn native_cache_path(
+    configured: Option<std::ffi::OsString>,
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let nonempty = |value: Option<std::ffi::OsString>| value.filter(|v| !v.is_empty());
+    nonempty(configured)
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            nonempty(xdg).map(|value| std::path::PathBuf::from(value).join("ale-native-decompiler"))
+        })
+        .or_else(|| {
+            nonempty(home)
+                .map(|value| std::path::PathBuf::from(value).join(".cache/ale-native-decompiler"))
+        })
+}
+
+#[cfg(target_os = "linux")]
 fn run_worker(
     path: &Path,
     input: &[u8],
@@ -305,6 +323,13 @@ fn run_worker(
         .env("LC_ALL", "C.UTF-8")
         .env("TMPDIR", directory.path())
         .process_group(0);
+    if let Some(cache) = native_cache_path(
+        std::env::var_os("ALE_NATIVE_CACHE"),
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("HOME"),
+    ) {
+        command.env("ALE_NATIVE_CACHE", cache);
+    }
     // Only async-signal-safe libc calls execute between fork and exec.
     unsafe {
         command.pre_exec(|| {
@@ -399,6 +424,54 @@ fn run_worker(
 pub(crate) mod tests {
     use super::*;
     use ale_systems_core::{AnalysisLimits, Architecture};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_selection_is_explicit_and_worker_environment_stays_restricted() {
+        let os = |value: &str| Some(std::ffi::OsString::from(value));
+        assert_eq!(
+            native_cache_path(os("/explicit cache"), os("/xdg"), os("/home/u")).unwrap(),
+            Path::new("/explicit cache")
+        );
+        assert_eq!(
+            native_cache_path(None, os("/xdg"), os("/home/u")).unwrap(),
+            Path::new("/xdg/ale-native-decompiler")
+        );
+        assert_eq!(
+            native_cache_path(None, None, os("/home/u")).unwrap(),
+            Path::new("/home/u/.cache/ale-native-decompiler")
+        );
+        assert_eq!(native_cache_path(None, None, None), None);
+        let expected = native_cache_path(
+            std::env::var_os("ALE_NATIVE_CACHE"),
+            std::env::var_os("XDG_CACHE_HOME"),
+            std::env::var_os("HOME"),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = script(
+            &directory,
+            "printf '%s\\n%s\\n%s\\n' \"${ALE_NATIVE_CACHE-unset}\" \"${HOME-unset}\" \"${XDG_CACHE_HOME-unset}\"",
+        );
+        let output = run_worker(
+            &path,
+            b"",
+            &AtomicBool::new(false),
+            Duration::from_secs(2),
+            4096,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "{}\nunset\nunset\n",
+                expected
+                    .as_deref()
+                    .map(|p| p.to_string_lossy())
+                    .unwrap_or_else(|| "unset".into())
+            )
+        );
+    }
 
     pub(crate) fn fixture() -> (BinaryImage, Analysis) {
         let mut bytes = vec![0; 0x300];

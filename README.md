@@ -1,21 +1,19 @@
 # A Less Awful Editor
 
-A native, local-first text editor and binary workbench for programmers who want
-to edit source code and inspect compiled files in one workspace.
+A native editor and binary workbench. Source, recovered C, assembly and bytes
+belong in the same workspace. Moving between them should not lose your work.
 
-Edit UTF-8 text, follow machine instructions, inspect bytes and control flow,
-and preview binary patches before exporting a separate copy. Your text stays
-open when you switch to binary views. No account or cloud service is required.
+Built in Rust with GPUI. Local files, local tools, no account.
 
-## What you can do
+The direction is Ghidra’s depth, Zed’s speed and Emacs’s reach: a compact IDE for
+ordinary code, large refactors, hardware logic, firmware and systems work.
+QEMU/KVM management, hardware design tools and project-wide refactoring are
+still ahead. They are not features you can use today.
 
-- Open, edit, and save text with Unicode navigation, selection, clipboard, and undo/redo.
-- Inspect ELF, PE, and Mach-O files with linked assembly, bytes, symbols, and strings.
-- Explore x86/x86-64 functions and control-flow graphs, and navigate to source when DWARF information is available.
-- Preview instruction or byte edits, undo patches, and export to a new file without overwriting the original.
-- View recovered pseudocode for supported Linux x86-64 binaries with the optional native decompiler.
+## What works now
 
-![Assembly view with linked binary navigation](docs/screenshots/workbench-assembly.png)
+Binary inspection does not execute the input. Patches stay in memory until you
+export a separate copy. Recovered code is an approximation, not original source.
 
 ## Run
 
@@ -24,6 +22,23 @@ Requires stable Rust and the native libraries listed below. From the project fol
 ```bash
 cargo run --locked -p a-less-awful-editor
 ```
+
+Open one existing file or folder directly:
+
+```bash
+cargo run --locked -p a-less-awful-editor -- src/main.c
+cargo run --locked -p a-less-awful-editor -- --binary build/firmware.elf
+cargo run --locked -p a-less-awful-editor -- --folder .
+```
+
+A plain path opens text. Use `--binary` for executable files or raw bytes,
+and `--folder` for the Files sidebar. Relative paths use the launch directory;
+quote paths containing spaces. Use `-- --name.c` for a text filename beginning
+with `-`.
+
+Run with `--help` for usage without a graphical session. Invalid arguments
+exit with status 2. Missing files, unsupported inputs, and read failures appear
+in the window. New files start from the empty buffer and **Save As**.
 
 ### Linux setup
 
@@ -43,23 +58,67 @@ If the file picker fails, check that your desktop portal is running.
 Instruction assembly also requires `/usr/bin/nasm` (`sudo apt-get install nasm`).
 Inspection and byte patching work without it.
 
-## Start using it
+## Controls
 
-- **Ctrl+O** opens text; **Ctrl+S** saves; **Ctrl+Shift+S** saves under another name.
-- **Ctrl+Shift+O** opens a binary for inspection.
-- **Ctrl+1** returns to your text; **Ctrl+2**, **Ctrl+3**, and **Ctrl+4** show binary overview, assembly, and bytes.
-- **Export copy** writes patched bytes to a new file.
+| Task | Control |
+| --- | --- |
+| Open menus | F10, arrows, Enter; Escape closes |
+| New / open text | Ctrl+N / Ctrl+O |
+| Save / Save As | Ctrl+S / Ctrl+Shift+S |
+| Close current document / quit | Ctrl+W / Ctrl+Q |
+| Next text tab | Ctrl+Tab |
+| Find / next / previous | Ctrl+F / F3 / Shift+F3 |
+| Go to Line | Ctrl+G |
+| Move / select by word | Ctrl+Left/Right / Ctrl+Shift+Left/Right |
+| Focus editor / terminal | Ctrl+Alt+E / Ctrl+Alt+T |
+| Inspect binary | Ctrl+Shift+O |
+| Text / overview / assembly / bytes | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 |
+| Browse a folder | File → Open Folder |
+| Export patches | Binary → Export Copy |
 
-Read the [text editing guide](docs/scratch-editor.md),
-[binary workbench guide](docs/systems-workbench.md), or
-[optional decompiler setup](tools/native-decompiler/README.md) for controls and supported inputs.
+Application shortcuts use Command on macOS. Text editing uses the bindings in
+[the editing guide](docs/scratch-editor.md). In the terminal, control keys go to
+the shell; Ctrl+Alt+E returns focus to the editor. Ctrl+C interrupts and
+Ctrl+Shift+V pastes. Restart and Stop live in the Terminal menu.
 
-## Practical limits
+Opening a folder does not run anything. Run your build command yourself.
 
-Text files must be regular UTF-8 files no larger than 16 MiB; binary inspection
-accepts files up to 64 MiB. Symlink paths are rejected. Overwriting existing text
-files is supported on Linux; use Save As to a new file on other systems.
+## Limits: TODO
 
-There is no integrated terminal, Git client, debugger, or syntax highlighting.
-Binary patches do not repair relocations, signatures, or checksums. Recovered
-pseudocode uses inferred names and types; it is not the original source.
+Up to 32 text documents per window, 16 MiB per input text file and 64 MiB per
+binary. Text must be regular UTF-8. Symlink paths are rejected. Saving over an
+existing text file is supported on Linux; other systems can Save As to a new file.
+Unsaved documents are checked when closing or quitting. Tabs do not survive a
+restart. Tab switching pauses during file operations so a save stays attached
+to its document.
+
+Find is literal and case-sensitive in the active text buffer. It scans a snapshot
+in the background, counts all matches and navigates the first 10,000. There is
+no Replace or project-wide search yet.
+
+The folder tree loads on demand and uses explicit Refresh. It bounds listings,
+cached folders, depth and visible rows. The terminal has resize and bounded
+scrollback; output is monochrome, with no mouse text selection or full IME support.
+Changing folders does not move an existing shell. Restart uses the selected
+folder. Stop sends hangup to the shell and foreground group; detached daemons
+are outside cleanup.
+
+Syntax highlighting, language-server diagnostics, Git UI and a debugger are
+unfinished. Ordinary byte patches do not repair relocations, signatures or
+checksums. Function replacement has explicit format and relocation limits.
+
+See the [text editing guide](docs/scratch-editor.md),
+[binary workbench guide](docs/systems-workbench.md),
+[native round-trip guide](docs/native-roundtrip.md) and
+[decompiler setup](tools/native-decompiler/README.md).
+
+## Check the build
+
+```bash
+scripts/check-editor.sh
+```
+
+This runs formatting, core dependency boundaries, workspace tests, Clippy and
+application linking. The native decompiler acceptance test still requires the
+pinned local worker; see the round-trip guide. A passing build is not a substitute
+for opening the app and checking it on your desktop.

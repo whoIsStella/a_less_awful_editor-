@@ -12,6 +12,16 @@ use gpui::{
     div, fill, point, prelude::*, px, relative, rgb, size,
 };
 
+#[derive(Clone, Copy)]
+pub enum EditCommand {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
 const LINE_HEIGHT: f32 = 21.0;
 const GUTTER: f32 = 56.0;
 
@@ -59,6 +69,47 @@ impl EditorView {
         self.buffer
             .text_in_range(0..self.buffer.len_chars())
             .unwrap_or_default()
+    }
+
+    pub fn selection(&self) -> ale_editor_core::Selection {
+        self.buffer.selection()
+    }
+    pub fn snapshot(&self) -> TextSnapshot {
+        self.buffer.text_snapshot()
+    }
+    pub fn line_count(&self) -> usize {
+        self.buffer.line_count()
+    }
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.finish_composition();
+        self.buffer.set_selection(range.start, range.end);
+        self.changed(cx);
+    }
+    pub fn edit_command(&mut self, command: EditCommand, cx: &mut Context<Self>) {
+        self.finish_composition();
+        match command {
+            EditCommand::Undo => {
+                self.buffer.undo();
+            }
+            EditCommand::Redo => {
+                self.buffer.redo();
+            }
+            EditCommand::SelectAll => self.buffer.select_all(),
+            EditCommand::Copy | EditCommand::Cut => {
+                if !self.buffer.selection().range().is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(self.buffer.selected_text()));
+                    if matches!(command, EditCommand::Cut) {
+                        self.buffer.insert("");
+                    }
+                }
+            }
+            EditCommand::Paste => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                    self.buffer.insert(&text);
+                }
+            }
+        }
+        self.changed(cx);
     }
 
     pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
@@ -128,6 +179,8 @@ impl EditorView {
             (false, "down") => Some(Movement::Down),
             (false, "home") => Some(Movement::LineStart),
             (false, "end") => Some(Movement::LineEnd),
+            (true, "left") => Some(Movement::WordLeft),
+            (true, "right") => Some(Movement::WordRight),
             (true, "home") => Some(Movement::DocumentStart),
             (true, "end") => Some(Movement::DocumentEnd),
             _ => None,

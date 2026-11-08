@@ -15,12 +15,12 @@ executed, and the original binary is never a save destination.
 | Save text / export binary copy | Ctrl+S, according to the active document |
 | Save text as / export binary copy | Ctrl+Shift+S |
 | Source for selected machine address | Source in systems toolbar |
-| Go to address | Go to, enter hex virtual address or `@hex` file offset, Run/Enter |
-| Search | Find, symbol/string text, Run/Enter |
-| Preview instruction edit | Select instruction, Assemble, Intel instruction, Run/Enter |
-| Preview byte edit | Select byte, Patch bytes, two-digit hex bytes, Run/Enter |
-| Apply / reverse patches | Apply patch / Undo / Redo |
-| Export | Export copy; choose a new path |
+| Go to address | Go to, enter hex virtual address or `@hex` file offset, Enter |
+| Search | Find, symbol/string text, Enter |
+| Preview instruction edit | Select instruction, Assemble, Intel instruction, Enter |
+| Preview byte edit | Select byte, Patch bytes, two-digit hex bytes, Enter |
+| Apply / reverse patches | Apply patch / Edit → Undo / Edit → Redo |
+| Export | Binary → Export Copy; choose a new path |
 
 On macOS the application shortcuts use Command.
 
@@ -149,7 +149,7 @@ can be ambiguous for shared tails. The optional native decompiler now connects t
 
 Set `ALE_DECOMPILER` to an absolute path to the pinned native worker before launch.
 Choose a function, open Pseudocode and press Decompile. Click a mapped token to
-select its machine location, then switch to Assembly or Bytes; Copy code copies
+select its machine location, then switch to Assembly or Bytes; Edit → Copy (Ctrl+C) copies
 the full recovered result. Cancel retains the document. New bytes or a different
 function clear the old pseudocode. Missing configuration and unsupported inputs
 show recoverable explanations. Names and types are inferred, not original source.
@@ -158,5 +158,5 @@ See [worker setup and input limits](../tools/native-decompiler/README.md).
 Pseudocode is supported for Linux ELF64 little-endian x86-64 executables and shared objects.
 
 Long pseudocode lines wrap into bounded display rows, with continuation markers.
-Each page shows up to 32 rows. Copy code retains the complete, original output,
+Each page shows up to 32 rows. Edit → Copy retains the complete, original output,
 including its line breaks; mapped tokens retain their machine locations across rows.
