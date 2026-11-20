@@ -432,24 +432,26 @@ impl Workbench {
         self.focus.focus(window);
         cx.notify();
     }
+    pub(super) fn source_path(&self, location: &SourceLocation) -> PathBuf {
+        self.path.with_file_name(&location.path)
+    }
     pub fn location_for_source(&self, path: &std::path::Path, line: usize) -> Option<usize> {
+        let matches = |location: &SourceLocation| {
+            location.line as usize == line + 1 && self.source_path(location) == path
+        };
         // Many instructions can belong to one source line. A representation
         // round trip must retain the exact selected instruction or byte.
         if self
             .image
             .source_at_offset(self.offset)
-            .is_some_and(|location| {
-                std::path::Path::new(&location.path) == path && location.line as usize == line + 1
-            })
+            .is_some_and(matches)
         {
             return Some(self.offset);
         }
         self.image
             .source_locations
             .iter()
-            .find(|location| {
-                std::path::Path::new(&location.path) == path && location.line as usize == line + 1
-            })
+            .find(|location| matches(location))
             .and_then(|location| location.file_offset)
     }
     pub fn go(&mut self, offset: usize, cx: &mut Context<Self>) {

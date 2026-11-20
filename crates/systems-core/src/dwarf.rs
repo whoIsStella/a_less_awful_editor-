@@ -122,7 +122,14 @@ fn read(object: &object::File<'_>) -> Result<Vec<SourceLocation>, String> {
                 .map(reader_string)
                 .transpose()?
                 .unwrap_or_default();
-            let path = source_path(&compilation_directory, &directory, &filename)?;
+            // Directory zero is the compilation directory: implicit before
+            // DWARF 5, explicit in the DWARF 5 directory table.
+            let base = if file.directory_index() == 0 && !directory.is_empty() {
+                ""
+            } else {
+                &compilation_directory
+            };
+            let path = source_path(base, &directory, &filename)?;
             let column = match row.column() {
                 ColumnType::LeftEdge => 0,
                 ColumnType::Column(column) => u32::try_from(column.get()).unwrap_or(u32::MAX),

@@ -518,3 +518,24 @@ fn call_relationships_match_linked_direct_call_sites() {
     }
     assert_eq!(graph.incoming[callee].len(), 2);
 }
+
+#[test]
+fn relative_compilation_directory_is_used_once() {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) || !optional_tool_available("cc") {
+        return;
+    }
+    let dir = FixtureDirectory::new();
+    fs::write(dir.0.join("example.c"), "int main(void) { return 0; }\n").unwrap();
+    for version in ["-gdwarf-4", "-gdwarf-5"] {
+        successful_output(
+            Command::new("cc")
+                .current_dir(&dir.0)
+                .arg(format!("-fdebug-prefix-map={}=build", dir.0.display()))
+                .args([version, "-O0", "-no-pie", "example.c", "-o", "example"]),
+        );
+        let image = BinaryImage::parse(fs::read(dir.0.join("example")).unwrap()).unwrap();
+        let main = image.symbols.iter().find(|s| s.name == "main").unwrap();
+        let row = image.source_at_offset(main.file_offset.unwrap()).unwrap();
+        assert_eq!(row.path, "build/example.c", "{version}");
+    }
+}
