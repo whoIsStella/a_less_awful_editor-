@@ -1,6 +1,6 @@
 //! Systems document lifecycle. Text and binary snapshots have independent ownership.
 use super::*;
-use ale_systems_core::{BinaryImage, SourceLocation};
+use ale_systems_core::BinaryImage;
 use systems::WorkbenchEvent;
 
 pub(super) enum BinaryIntent {
@@ -237,7 +237,8 @@ impl AppShell {
                     window,
                     |this, workbench, event, window, cx| match event {
                         WorkbenchEvent::Source(location) => {
-                            this.request_source(location.clone(), window, cx)
+                            let path = workbench.read(cx).source_path(location);
+                            this.request_source(path, location.line, window, cx)
                         }
                         WorkbenchEvent::RecoveredC {
                             text,
@@ -270,15 +271,15 @@ impl AppShell {
 
     fn request_source(
         &mut self,
-        location: SourceLocation,
+        path: PathBuf,
+        source_line: u32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.busy {
             return;
         }
-        let path = PathBuf::from(location.path);
-        let line = location.line.saturating_sub(1) as usize;
+        let line = source_line.saturating_sub(1) as usize;
         if self.path.as_ref() == Some(&path) {
             self.editor
                 .update(cx, |editor, cx| editor.go_to_line(line, cx));

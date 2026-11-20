@@ -609,20 +609,39 @@ fn source_navigation_reuses_dirty_matching_buffer_and_retains_other_tabs(cx: &mu
 
 #[gpui::test]
 fn source_round_trip_retains_exact_instruction_and_interior_byte(cx: &mut TestAppContext) {
+    check_source_round_trip(cx, false);
+}
+
+#[gpui::test]
+fn relative_source_round_trip_uses_the_binary_directory(cx: &mut TestAppContext) {
+    check_source_round_trip(cx, true);
+}
+
+fn check_source_round_trip(cx: &mut TestAppContext, relative_debug_path: bool) {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         eprintln!("SKIP: exact-location DWARF fixture requires a Linux x86-64 compiler.");
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("mapped.c");
+    let build = directory.path().join("build");
+    std::fs::create_dir(&build).unwrap();
+    let source = build.join("mapped.c");
     let binary = directory.path().join("mapped.elf");
     std::fs::write(
         &source,
         "__attribute__((noinline)) int mapped_line(int n) { return (n + 4) ^ 3; }\nint main(void) { return mapped_line(7); }\n",
     ).unwrap();
-    let output = match std::process::Command::new("cc")
+    let mut compiler = std::process::Command::new("cc");
+    let recorded_path = if relative_debug_path {
+        compiler.arg(format!("-fdebug-prefix-map={}=build", build.display()));
+        std::path::Path::new("build/mapped.c")
+    } else {
+        source.as_path()
+    };
+    let output = match compiler
         .args(["-g", "-O0", "-fno-inline", "-fno-pie", "-no-pie"])
-        .arg(&source)
+        .current_dir(&build)
+        .arg("mapped.c")
         .arg("-o")
         .arg(&binary)
         .env("LC_ALL", "C")
@@ -655,7 +674,9 @@ fn source_round_trip_retains_exact_instruction_and_interior_byte(cx: &mut TestAp
     let first_for_line = image
         .source_locations
         .iter()
-        .find(|location| std::path::Path::new(&location.path) == source && location.line == 1)
+        .find(|location| {
+            std::path::Path::new(&location.path) == recorded_path && location.line == 1
+        })
         .and_then(|location| location.file_offset)
         .unwrap();
     let instruction = instructions
@@ -668,7 +689,8 @@ fn source_round_trip_retains_exact_instruction_and_interior_byte(cx: &mut TestAp
                     .into_iter()
                     .all(|offset| {
                         image.source_at_offset(offset).is_some_and(|location| {
-                            std::path::Path::new(&location.path) == source && location.line == 1
+                            std::path::Path::new(&location.path) == recorded_path
+                                && location.line == 1
                         })
                     })
         })
