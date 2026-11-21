@@ -4,7 +4,11 @@ use ale_systems_core::{BinaryImage, SourceLocation};
 use systems::WorkbenchEvent;
 
 pub(super) enum BinaryIntent {
-    Open(PathBuf, Box<BinaryImage>),
+    Open {
+        path: PathBuf,
+        image: Box<BinaryImage>,
+        owner_executable: bool,
+    },
     Close,
     CloseDocument,
 }
@@ -131,20 +135,20 @@ impl AppShell {
         self.busy = true;
         self.status = "Loading binary for inspection...".into();
         cx.notify();
-        let worker_path = path.clone();
         let work = cx.background_executor().spawn(async move {
-            systems_io::read_binary(&worker_path).and_then(BinaryImage::parse)
+            let snapshot = systems_io::read_binary(&path)?;
+            BinaryImage::parse(snapshot.bytes).map(|image| BinaryIntent::Open {
+                path,
+                image: Box::new(image),
+                owner_executable: snapshot.owner_executable,
+            })
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok(image) => this.request_binary_replace(
-                        BinaryIntent::Open(path, Box::new(image)),
-                        window,
-                        cx,
-                    ),
+                    Ok(intent) => this.request_binary_replace(intent, window, cx),
                     Err(error) => this.failure(format!("Inspection failed: {error}"), window, cx),
                 }
             });
@@ -228,9 +232,14 @@ impl AppShell {
                 self.replacement_target = None;
                 self.show_editor(window, cx);
             }
-            BinaryIntent::Open(path, image) => {
+            BinaryIntent::Open {
+                path,
+                image,
+                owner_executable,
+            } => {
                 self.replacement_target = None;
-                let workbench = cx.new(|cx| Workbench::new(path, *image, cx));
+                let workbench =
+                    cx.new(|cx| Workbench::from_file(path, *image, owner_executable, cx));
                 cx.observe(&workbench, |_, _, cx| cx.notify()).detach();
                 cx.subscribe_in(
                     &workbench,

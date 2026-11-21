@@ -326,7 +326,17 @@ impl Workbench {
         }
     }
 
+    #[cfg(test)]
     pub fn new(path: PathBuf, image: BinaryImage, cx: &mut Context<Self>) -> Self {
+        Self::from_file(path, image, false, cx)
+    }
+
+    pub fn from_file(
+        path: PathBuf,
+        image: BinaryImage,
+        owner_executable: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| EditorView::input("", cx));
         cx.subscribe(&input, |this, _, _: &ale_editor_view::Submit, cx| {
             this.run(cx)
@@ -354,7 +364,7 @@ impl Workbench {
             })
             .unwrap_or(0);
         let architecture = image.architecture.clone();
-        let executable_export = !image.rewrite_locations().is_empty();
+        let executable_export = owner_executable || !image.rewrite_locations().is_empty();
         let mut this = Self {
             path,
             image: Arc::new(image),
@@ -1363,7 +1373,7 @@ impl Render for Workbench {
                 div().flex().items_center().gap_2().h(px(30.0)).flex_shrink_0().px_3().bg(rgb(0x1c2a3d))
                     .child(div().text_size(px(11.0)).text_color(rgb(0x8590a3)).child("PREVIEW"))
                     .child(div().flex_1().min_w_0().truncate().font_family("DejaVu Sans Mono").text_size(px(12.0)).text_color(rgb(0x7dcfff)).child(bytes.clone()))
-                    .child(button("Apply patch").bg(rgb(0x7aa2f7)).text_color(rgb(0x101216)).on_click(cx.listener(|this, _, _, cx| this.apply_patch(cx))))))
+                    .child(button("Apply patch").debug_selector(|| "apply-byte-patch".into()).bg(rgb(0x7aa2f7)).text_color(rgb(0x101216)).on_click(cx.listener(|this, _, _, cx| this.apply_patch(cx))))))
             .when_some(self.preview.as_ref().and_then(|preview|match preview {Preview::Native {plan,compiler_identity,..}=>Some((native_preview_text(plan,compiler_identity),native_body_text(plan))),_=>None}), |root, (summary,body)| root.child(
                 div().flex().flex_col().flex_shrink_0().px_3().py_1().bg(rgb(0x1c2a3d)).gap_1()
                     .child(div().id("native-preview-details").max_h(px(150.0)).overflow_scroll().whitespace_normal().text_size(px(11.0)).text_color(rgb(0x7dcfff)).child(summary))

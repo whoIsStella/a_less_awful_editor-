@@ -98,10 +98,13 @@ the text view is active. Export cancellation/failure retains both documents.
 Export uses a same-directory temporary file, flush, file sync, create-only commit,
 and on Unix directory sync. Existing destinations are refused, including a file
 created after the initial check. The original path is never truncated or replaced.
-Copies have private temporary-file permissions, not executable permission copied
-from the source. Symlinks and symlink ancestors are rejected. A directory-sync
-failure reports that the output exists but durability is uncertain; patches remain
-dirty so the user can recover deliberately.
+On Unix, exporting a binary opened with owner execute permission creates a private
+runnable copy (0700). Other ordinary patch exports keep private, non-executable
+permissions. Native replacement exports also use 0700.
+
+The editor rejects symlinks and symlink ancestors. If directory sync fails, the
+editor reports that the output exists and keeps the patches dirty because crash
+durability is uncertain.
 
 Reads compare metadata before and after bounded I/O. These checks are not a
 transaction against concurrent writers and do not prevent all ancestor-directory

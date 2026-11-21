@@ -67,12 +67,18 @@ fn same_version(before: &Metadata, after: &Metadata) -> bool {
     unchanged
 }
 
+#[derive(Debug)]
+pub(crate) struct BinarySnapshot {
+    pub bytes: Vec<u8>,
+    pub owner_executable: bool,
+}
+
 /// Preserve all bytes, including NUL and invalid UTF-8, in a bounded snapshot.
-pub(crate) fn read_binary(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_binary(path: &Path) -> Result<BinarySnapshot, String> {
     read_binary_impl(path, || {})
 }
 
-fn read_binary_impl(path: &Path, after_read: impl FnOnce()) -> Result<Vec<u8>, String> {
+fn read_binary_impl(path: &Path, after_read: impl FnOnce()) -> Result<BinarySnapshot, String> {
     let path = checked_path(path)?;
     let selected = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
     if !selected.is_file() {
@@ -115,7 +121,17 @@ fn read_binary_impl(path: &Path, after_read: impl FnOnce()) -> Result<Vec<u8>, S
                 .into(),
         );
     }
-    Ok(bytes)
+    #[cfg(unix)]
+    let owner_executable = {
+        use std::os::unix::fs::PermissionsExt;
+        before.permissions().mode() & 0o100 != 0
+    };
+    #[cfg(not(unix))]
+    let owner_executable = false;
+    Ok(BinarySnapshot {
+        bytes,
+        owner_executable,
+    })
 }
 
 /// Export to a new path without truncating or replacing an existing destination.
@@ -559,7 +575,9 @@ mod tests {
         let path = directory.path().join("binary");
         let bytes = [0, 255, 128, b'\r', b'\n', 0x90, 0xc3];
         fs::write(&path, bytes).unwrap();
-        assert_eq!(read_binary(&path).unwrap(), bytes);
+        let snapshot = read_binary(&path).unwrap();
+        assert_eq!(snapshot.bytes, bytes);
+        assert!(!snapshot.owner_executable);
         assert!(read_binary(directory.path()).is_err());
         let large = File::create(directory.path().join("large")).unwrap();
         large.set_len(MAX_BINARY_BYTES + 1).unwrap();
@@ -609,6 +627,14 @@ mod tests {
         fs::write(&source, [0, 128, 255]).unwrap();
         export_copy(&output, &[0x90, 0xc3]).unwrap();
         assert_eq!(fs::read(&output).unwrap(), [0x90, 0xc3]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&output).unwrap().permissions().mode() & 0o177,
+                0
+            );
+        }
         assert!(export_copy(&source, &[0x90]).is_err());
         assert_eq!(fs::read(&source).unwrap(), [0, 128, 255]);
         let race = directory.path().join("race");

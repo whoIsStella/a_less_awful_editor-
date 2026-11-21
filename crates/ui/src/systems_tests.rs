@@ -386,7 +386,11 @@ fn load_binary(
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.request_binary_replace(
-                crate::BinaryIntent::Open(path, Box::new(fixture())),
+                crate::BinaryIntent::Open {
+                    path,
+                    image: Box::new(fixture()),
+                    owner_executable: false,
+                },
                 window,
                 cx,
             );
@@ -427,6 +431,87 @@ fn binary_document_tab_resumes_lens_and_scroll(cx: &mut TestAppContext) {
             });
         }
     }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[gpui::test]
+fn assembled_copy_runs_and_undo_restores_original(cx: &mut TestAppContext) {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command as Process};
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("exit.s");
+    let input = directory.path().join("original");
+    let output = directory.path().join("edited");
+    fs::write(
+        &source,
+        ".global _start\n_start:\n mov $1, %eax\n mov %eax, %edi\n mov $60, %eax\n syscall\n",
+    )
+    .unwrap();
+    assert!(
+        Process::new("cc")
+            .args(["-nostdlib", "-no-pie"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&input)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let original = fs::read(&input).unwrap();
+    let (shell, cx) = cx.add_window_view(crate::AppShell::new);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.inspect_path(input.clone(), window, cx)
+        })
+    });
+    cx.run_until_parked();
+    let workbench = cx.update(|_, cx| shell.read(cx).workbench.clone().unwrap());
+    cx.dispatch_action(crate::ShowAssembly);
+    cx.update(|window, cx| {
+        workbench.update(cx, |w, cx| {
+            w.command = Command::Assemble;
+            w.input.read(cx).focus_handle(cx).focus(window);
+        });
+    });
+    cx.simulate_input("mov eax, 2");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.draw(
+        gpui::point(px(0.0), px(0.0)),
+        gpui::size(px(1200.0), px(800.0)),
+        |_, _| workbench.clone().into_any_element(),
+    );
+    let apply = cx
+        .debug_bounds("apply-byte-patch")
+        .expect("assembly preview");
+    cx.simulate_click(apply.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    update(&workbench, cx, |w, _| {
+        assert_eq!(w.instructions[0].bytes, [0xb8, 2, 0, 0, 0])
+    });
+    cx.simulate_keystrokes("ctrl-z");
+    update(&workbench, cx, |w, _| {
+        assert!(
+            w.image.bytes() == original,
+            "Undo after Apply must restore the binary"
+        )
+    });
+    cx.simulate_keystrokes("ctrl-shift-z");
+    cx.dispatch_action(crate::Save);
+    cx.simulate_new_path_selection(|_| Some(output.clone()));
+    cx.run_until_parked();
+    assert_eq!(
+        fs::metadata(&output).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+    assert_eq!(Process::new(&input).status().unwrap().code(), Some(1));
+    assert_eq!(Process::new(&output).status().unwrap().code(), Some(2));
+    assert_eq!(fs::read(&input).unwrap(), original);
+    cx.simulate_keystrokes("ctrl-z");
+    update(&workbench, cx, |w, _| {
+        assert_eq!(w.image.bytes(), original);
+        assert!(w.is_dirty());
+    });
 }
 
 #[gpui::test]
@@ -525,7 +610,11 @@ fn shell_close_checks_text_then_binary_and_cancel_retains_both(cx: &mut TestAppC
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.request_binary_replace(
-                crate::BinaryIntent::Open(directory.path().join("next.bin"), Box::new(fixture())),
+                crate::BinaryIntent::Open {
+                    path: directory.path().join("next.bin"),
+                    image: Box::new(fixture()),
+                    owner_executable: false,
+                },
                 window,
                 cx,
             );
@@ -678,7 +767,11 @@ fn source_round_trip_retains_exact_instruction_and_interior_byte(cx: &mut TestAp
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.request_binary_replace(
-                crate::BinaryIntent::Open(binary, Box::new(image)),
+                crate::BinaryIntent::Open {
+                    path: binary,
+                    image: Box::new(image),
+                    owner_executable: false,
+                },
                 window,
                 cx,
             );
@@ -942,7 +1035,11 @@ fn binary_close_approval_is_cleared_on_abort_and_scoped_to_its_document(cx: &mut
             shell.close_text_revision = Some(shell.editor.read(cx).content_revision());
             shell.close_binary_revision = Some((first.entity_id(), first_revision));
             shell.request_binary_replace(
-                crate::BinaryIntent::Open(PathBuf::from("second.bin"), Box::new(fixture())),
+                crate::BinaryIntent::Open {
+                    path: PathBuf::from("second.bin"),
+                    image: Box::new(fixture()),
+                    owner_executable: false,
+                },
                 window,
                 cx,
             );
