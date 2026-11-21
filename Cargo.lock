@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "ale-ui",
  "gpui",
+ "libc",
 ]
 
 [[package]]
@@ -91,10 +92,14 @@ dependencies = [
  "ale-editor-core",
  "ale-editor-view",
  "ale-systems-core",
+ "globset",
  "gpui",
+ "ignore",
  "libc",
  "portable-pty",
+ "regex",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "vt100",
 ]
@@ -2775,6 +2780,22 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "484be5657551d7868d67587df967fb4fcbe9d266a761cc855aaa148fda0b3cc7"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
 ]
 
 [[package]]

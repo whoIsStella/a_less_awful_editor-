@@ -27,6 +27,8 @@ pub(crate) fn init_keymap(cx: &mut App) {
     cx.bind_keys(
         [
             "ctrl-n",
+            "ctrl-p",
+            "ctrl-shift-f",
             "ctrl-f",
             "ctrl-g",
             "f3",

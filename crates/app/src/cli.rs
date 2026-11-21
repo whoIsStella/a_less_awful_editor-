@@ -3,16 +3,20 @@ use std::{ffi::OsString, path::PathBuf};
 
 pub const HELP: &str = "A Less Awful Editor
 
-Usage: a-less-awful-editor [--text | --binary | --folder] PATH
+Usage: a-less-awful-editor [--reuse-window] [--text] [--line N [--column N]] PATH...
+       a-less-awful-editor [--binary | --folder] PATH
        a-less-awful-editor [--help]
 
   PATH           Open an existing UTF-8 text file (up to 16 MiB).
-  --text PATH    Open a text file explicitly.
+  --reuse-window Send text paths to an existing window (Unix).
+  --text PATH... Open text files explicitly.
+  --line N       Open text at line N (counting from 1).
+  --column N     Open text at column N (counting from 1).
   --binary PATH  Inspect a binary (up to 64 MiB); never execute it.
   --folder PATH  Browse one folder without starting a shell or indexing it.
   --help, -h     Show this help without opening a window.
 
-With no arguments, open an empty text buffer. One target per launch.
+With no arguments, open an empty text buffer.
 Relative paths use the caller's working directory. Put -- before a path
 beginning with '-'. Symlinks and paths containing '..' are unsupported.
 File-loading errors appear in the window; invalid arguments exit with status 2.
@@ -23,6 +27,11 @@ pub enum Launch {
     Empty,
     Help,
     Open(OpenTarget),
+    OpenText {
+        paths: Vec<PathBuf>,
+        line: usize,
+        column: usize,
+    },
 }
 
 /// Parse OS strings without opening files or initializing the graphical platform.
@@ -38,33 +47,95 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Launch, String>
             Err("--help must be used alone.".into())
         };
     }
-    let (mode, mut path) = if first == "--text" {
-        (OpenTarget::Text as fn(PathBuf) -> OpenTarget, args.next())
-    } else if first == "--binary" {
-        (OpenTarget::Binary as fn(PathBuf) -> OpenTarget, args.next())
-    } else if first == "--folder" {
-        (OpenTarget::Folder as fn(PathBuf) -> OpenTarget, args.next())
-    } else {
-        (OpenTarget::Text as fn(PathBuf) -> OpenTarget, Some(first))
-    };
-    let escaped = path.as_deref() == Some(std::ffi::OsStr::new("--"));
-    if escaped {
-        path = args.next();
+
+    let mut pending = Some(first);
+    let mut mode = "text";
+    let mut mode_selected = false;
+    let mut line = None;
+    let mut column = None;
+    let mut escaped = false;
+    let mut paths = Vec::new();
+    while let Some(arg) = pending.take().or_else(|| args.next()) {
+        if !escaped && arg == "--" {
+            escaped = true;
+        } else if !escaped && paths.is_empty() && (arg == "--line" || arg == "--column") {
+            let value = args
+                .next()
+                .and_then(|value| value.to_str()?.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    format!(
+                        "Expected a positive number after {}.",
+                        arg.to_string_lossy()
+                    )
+                })?;
+            let slot = if arg == "--line" {
+                &mut line
+            } else {
+                &mut column
+            };
+            if slot.replace(value).is_some() {
+                return Err(format!(
+                    "{} may be specified only once.",
+                    arg.to_string_lossy()
+                ));
+            }
+        } else if !escaped
+            && paths.is_empty()
+            && (arg == "--text" || arg == "--binary" || arg == "--folder")
+        {
+            if mode_selected {
+                return Err("Specify only one opening mode.".into());
+            }
+            mode_selected = true;
+            mode = if arg == "--binary" {
+                "binary"
+            } else if arg == "--folder" {
+                "folder"
+            } else {
+                "text"
+            };
+        } else {
+            if arg.is_empty() {
+                return Err("The path must not be empty.".into());
+            }
+            if !escaped && arg.as_encoded_bytes().starts_with(b"-") {
+                return Err(format!(
+                    "Unexpected option '{}'. Use --help, or put -- before a path beginning with '-'.",
+                    arg.to_string_lossy()
+                ));
+            }
+            paths.push(PathBuf::from(arg));
+        }
     }
-    let path = path.ok_or("Expected a path. Use --help for usage.")?;
-    if path.is_empty() {
-        return Err("The path must not be empty.".into());
+    if paths.is_empty() {
+        return Err("Expected a path. Use --help for usage.".into());
     }
-    if !escaped && path.as_encoded_bytes().starts_with(b"-") {
-        return Err(format!(
-            "Unexpected option '{}'. Use --help, or put -- before a path beginning with '-'.",
-            path.to_string_lossy()
-        ));
+    if paths.len() > 32 {
+        return Err("At most 32 text paths can be opened at once.".into());
     }
-    if args.next().is_some() {
-        return Err("Open one target per launch. Use --help for usage.".into());
+    if mode != "text" {
+        if paths.len() != 1 || line.is_some() || column.is_some() {
+            return Err("Binary and folder modes accept one path without a text location.".into());
+        }
+        let path = paths.pop().unwrap();
+        return Ok(Launch::Open(if mode == "binary" {
+            OpenTarget::Binary(path)
+        } else {
+            OpenTarget::Folder(path)
+        }));
     }
-    Ok(Launch::Open(mode(path.into())))
+    if column.is_some() && line.is_none() {
+        return Err("--column requires --line.".into());
+    }
+    if paths.len() == 1 && line.is_none() {
+        return Ok(Launch::Open(OpenTarget::Text(paths.pop().unwrap())));
+    }
+    Ok(Launch::OpenText {
+        paths,
+        line: line.unwrap_or(1),
+        column: column.unwrap_or(1),
+    })
 }
 
 #[cfg(test)]
@@ -120,12 +191,30 @@ mod tests {
             vec!["--binary", "--"],
             vec![""],
             vec!["--unknown"],
-            vec!["one.c", "two.c"],
             vec!["--text", "--binary", "image"],
             vec!["--binary", "--folder"],
             vec!["--help", "one.c"],
         ] {
             assert!(args(&values).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn multiple_text_paths_and_location() {
+        assert_eq!(
+            args(&["--line", "2", "--column", "3", "one.c", "two λ.c"]),
+            Ok(Launch::OpenText {
+                paths: vec!["one.c".into(), "two λ.c".into()],
+                line: 2,
+                column: 3,
+            })
+        );
+        for invalid in [
+            &["--column", "2", "one.c"][..],
+            &["--line", "0", "one.c"],
+            &["--binary", "a", "b"],
+        ] {
+            assert!(args(invalid).is_err());
         }
     }
 
