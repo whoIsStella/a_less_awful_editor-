@@ -4,15 +4,10 @@ use regex::RegexBuilder;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Read},
+    io::Read,
     ops::Range,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    time::Duration,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 const MAX_FILES: usize = 50_000;
@@ -107,104 +102,55 @@ pub(crate) fn search(
             (path, item.text)
         })
         .collect();
-    let mut child = Command::new("rg")
-        .current_dir(&root)
-        .args([
-            "--files",
-            "--hidden",
-            "--no-config",
-            "--no-require-git",
-            "--null",
-            "--glob",
-            "!.git/**",
-            "--glob",
-            "!**/target/**",
-            "--glob",
-            "!**/node_modules/**",
-        ])
-        .env_remove("RIPGREP_CONFIG_PATH")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Cannot start ripgrep (rg): {e}"))?;
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let (sender, receiver) = mpsc::sync_channel(128);
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut name = Vec::new();
-            match reader.read_until(0, &mut name) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if name.last() == Some(&0) {
-                        name.pop();
-                    }
-                    if sender.send(Ok(name)).is_err() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let _ = sender.send(Err(error.to_string()));
-                    break;
-                }
-            }
-        }
+    let mut exclusions = ignore::overrides::OverrideBuilder::new(&root);
+    for pattern in ["!**/.git", "!**/target", "!**/node_modules"] {
+        exclusions.add(pattern).map_err(|e| e.to_string())?;
+    }
+    let mut builder = ignore::WalkBuilder::new(&root);
+    builder
+        .hidden(false)
+        .require_git(false)
+        .add_custom_ignore_filename(".rgignore")
+        .overrides(exclusions.build().map_err(|e| e.to_string())?);
+    let mut rules = builder.build_matchers().remove(0);
+    let open_files = overlays.keys().filter_map(|path| {
+        let relative = path.strip_prefix(&root).ok()?;
+        (!rules.matched(relative, false).is_ignore()).then(|| Ok(path.clone()))
     });
-    let stderr_thread = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.take(8192).read_to_string(&mut text);
-        text
+    let disk_files = builder.build().filter_map(|entry| match entry {
+        Ok(entry)
+            if entry.file_type().is_some_and(|kind| kind.is_file())
+                && !overlays.contains_key(entry.path()) =>
+        {
+            Some(Ok(entry.into_path()))
+        }
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
     });
     let mut report = SearchReport::default();
-    for path in overlays
-        .keys()
-        .filter(|path| path.starts_with(&root) && !path.exists())
-    {
-        warning(
-            &mut report,
-            format!(
-                "Unsaved file {} is missing on disk and could not be checked against ignore rules.",
-                path.display()
-            ),
-        );
-    }
-    let mut files = 0;
-    loop {
+    for (index, entry) in open_files.chain(disk_files).enumerate() {
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
             report.truncated = true;
-            let _ = child.kill();
             break;
         }
-        let name = match receiver.recv_timeout(Duration::from_millis(30)) {
-            Ok(Ok(name)) => name,
-            Ok(Err(error)) => {
-                warning(&mut report, format!("File listing failed: {error}"));
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-        files += 1;
-        if files > MAX_FILES {
+        if index == MAX_FILES {
             warning(&mut report, format!("Stopped after {MAX_FILES} files."));
-            let _ = child.kill();
             break;
         }
-        #[cfg(unix)]
-        let relative = {
-            use std::os::unix::ffi::OsStringExt;
-            PathBuf::from(std::ffi::OsString::from_vec(name))
+        let path = match entry {
+            Ok(path) => path,
+            Err(error) => {
+                warning(&mut report, format!("File listing failed: {error}"));
+                continue;
+            }
         };
-        #[cfg(not(unix))]
-        let relative = PathBuf::from(String::from_utf8_lossy(&name).into_owned());
-        if (!options.include.trim().is_empty() && !include.is_match(&relative))
-            || exclude.is_match(&relative)
+        let relative = path.strip_prefix(&root).expect("workspace-relative path");
+        if (!options.include.trim().is_empty() && !include.is_match(relative))
+            || exclude.is_match(relative)
         {
             continue;
         }
-        let path = root.join(&relative);
         let text = if let Some(text) = overlays.get(&path) {
             text.clone()
         } else {
@@ -320,22 +266,8 @@ pub(crate) fn search(
             last_byte = found.end();
         }
         if report.cancelled {
-            let _ = child.kill();
             break;
         }
-    }
-    drop(receiver);
-    let status = child
-        .wait()
-        .map_err(|e| format!("Could not wait for ripgrep: {e}"))?;
-    let stderr = stderr_thread.join().unwrap_or_default();
-    if !report.cancelled && status.code() != Some(0) && status.code() != Some(1) {
-        warning(
-            &mut report,
-            format!("File listing failed: {}", stderr.trim()),
-        );
-    } else if !stderr.trim().is_empty() {
-        warning(&mut report, format!("File listing: {}", stderr.trim()));
     }
     Ok(report)
 }
@@ -344,6 +276,32 @@ pub(crate) fn search(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn deleted_buffers_follow_workspace_ignore_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored*.rs").unwrap();
+        let overlays = ["gone.rs", "ignored-gone.rs", "target/gone.rs"]
+            .into_iter()
+            .map(|name| Overlay {
+                path: dir.path().join(name),
+                text: "needle".into(),
+            })
+            .collect();
+        let report = search(
+            dir.path(),
+            overlays,
+            SearchOptions {
+                query: "needle".into(),
+                ..Default::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(report.total, 1);
+        assert_eq!(report.matches[0].path, dir.path().join("gone.rs"));
+        assert!(!report.truncated);
+    }
 
     #[test]
     fn searches_unsaved_overlays_and_respects_ignore_filters_and_unicode() {

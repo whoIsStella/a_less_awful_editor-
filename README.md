@@ -95,12 +95,11 @@ to its document.
 
 Find is literal and case-sensitive in the active text buffer. It scans a snapshot
 in the background, counts all matches and navigates the first 10,000. There is
-no Replace yet. Workspace Search uses `rg` to enumerate files and honors ignore rules.
+no Replace yet. Workspace Search honors ignore rules for disk files and open buffers.
 It searches open unsaved buffers in place of disk contents. Case, whole-word and regex
 options and comma-separated include/exclude globs are available. Results identify
 incomplete scans. Search stops at 50,000 files and retains up to 10,000 matches. Files larger
-than 16 MiB, binary files, `target` and `node_modules` are excluded. An open file
-removed from disk is reported as an incomplete scan.
+than 16 MiB, binary files, `target` and `node_modules` are excluded. A named buffer remains searchable after its file is removed from disk.
 
 The folder tree loads on demand and uses explicit Refresh. It bounds listings,
 cached folders, depth and visible rows. The terminal has resize and bounded
