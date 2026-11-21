@@ -1,9 +1,9 @@
 mod cli;
 
 use ale_ui::{
-    AppShell, Close, Find, FindNext, FindPrevious, FocusEditor, FocusTerminal, GoToLine,
-    InspectBinary, NewDocument, NextDocument, Open, OpenFolder, OpenMenu, Quit, Save, SaveAs,
-    ShowAssembly, ShowBytes, ShowEditor, ShowOverview, TogglePanels,
+    AppShell, Close, Find, FindNext, FindPrevious, FindWorkspace, FocusEditor, FocusTerminal,
+    GoToLine, InspectBinary, NewDocument, NextDocument, Open, OpenFolder, OpenMenu, Quit, Save,
+    SaveAs, ShowAssembly, ShowBytes, ShowEditor, ShowOverview, TogglePanels,
 };
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
@@ -33,6 +33,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new(&format!("{modifier}-n"), NewDocument, None),
             KeyBinding::new(&format!("{modifier}-f"), Find, None),
+            KeyBinding::new(&format!("{modifier}-shift-f"), FindWorkspace, None),
             KeyBinding::new(&format!("{modifier}-g"), GoToLine, None),
             KeyBinding::new("f3", FindNext, None),
             KeyBinding::new("shift-f3", FindPrevious, None),

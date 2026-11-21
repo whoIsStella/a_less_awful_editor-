@@ -46,6 +46,7 @@ enum Command {
     Quit,
     Edit(EditCommand),
     Find,
+    FindWorkspace,
     NextMatch,
     PreviousMatch,
     Line,
@@ -87,6 +88,7 @@ fn items(menu: usize) -> Vec<(&'static str, &'static str, Command)> {
             ("Paste", "Ctrl+V", Edit(EditCommand::Paste)),
             ("Select All", "Ctrl+A", Edit(EditCommand::SelectAll)),
             ("Find…", "Ctrl+F", Find),
+            ("Search Workspace…", "Ctrl+Shift+F", FindWorkspace),
         ],
         2 => vec![
             ("Files Sidebar", "", Files),
@@ -303,6 +305,7 @@ impl AppShell {
             }
             Find => self.open_bar(Bar::Find, window, cx),
             Line => self.open_bar(Bar::Line, window, cx),
+            FindWorkspace => self.show_workspace_search(window, cx),
             NextMatch => self.find_match(false, cx),
             PreviousMatch => self.find_match(true, cx),
             Files => {

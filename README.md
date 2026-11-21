@@ -68,6 +68,7 @@ Inspection and byte patching work without it.
 | Close current document / quit | Ctrl+W / Ctrl+Q |
 | Next text tab | Ctrl+Tab |
 | Find / next / previous | Ctrl+F / F3 / Shift+F3 |
+| Search open folder | Ctrl+Shift+F |
 | Go to Line | Ctrl+G |
 | Move / select by word | Ctrl+Left/Right / Ctrl+Shift+Left/Right |
 | Focus editor / terminal | Ctrl+Alt+E / Ctrl+Alt+T |
@@ -94,7 +95,12 @@ to its document.
 
 Find is literal and case-sensitive in the active text buffer. It scans a snapshot
 in the background, counts all matches and navigates the first 10,000. There is
-no Replace or project-wide search yet.
+no Replace yet. Workspace Search uses `rg` to enumerate files and honors ignore rules.
+It searches open unsaved buffers in place of disk contents. Case, whole-word and regex
+options and comma-separated include/exclude globs are available. Results identify
+incomplete scans. Search stops at 50,000 files and retains up to 10,000 matches. Files larger
+than 16 MiB, binary files, `target` and `node_modules` are excluded. An open file
+removed from disk is reported as an incomplete scan.
 
 The folder tree loads on demand and uses explicit Refresh. It bounds listings,
 cached folders, depth and visible rows. The terminal has resize and bounded

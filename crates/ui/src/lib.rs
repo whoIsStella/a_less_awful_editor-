@@ -10,6 +10,8 @@ mod systems;
 mod systems_io;
 mod systems_shell;
 mod terminal;
+mod workspace_search;
+mod workspace_search_ui;
 
 /// Keep application shortcuts from preempting input to a focused terminal.
 pub fn init_terminal_keymap(cx: &mut gpui::App) {
@@ -53,6 +55,7 @@ actions!(
         TogglePanels,
         NewDocument,
         Find,
+        FindWorkspace,
         FindNext,
         FindPrevious,
         GoToLine,
@@ -106,6 +109,7 @@ pub struct AppShell {
     document_order: Vec<gpui::EntityId>,
     quit_approvals: Vec<(gpui::EntityId, u64)>,
     commands: commands::CommandState,
+    workspace_search: workspace_search_ui::SearchState,
     panel: Panel,
     terminal: Option<Entity<terminal::Terminal>>,
     explorer_visible: bool,
@@ -166,6 +170,36 @@ impl AppShell {
         let editor = cx.new(|cx| EditorView::new("", cx));
         editor.read(cx).focus_handle(cx).focus(window);
         cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+        let workspace_search = workspace_search_ui::SearchState::new(cx);
+        for input in [
+            &workspace_search.query,
+            &workspace_search.include,
+            &workspace_search.exclude,
+        ] {
+            cx.subscribe(input, |this, _, _: &ale_editor_view::Submit, cx| {
+                this.run_workspace_search(cx);
+            })
+            .detach();
+        }
+        for (index, input) in [
+            &workspace_search.query,
+            &workspace_search.include,
+            &workspace_search.exclude,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            cx.observe(input, move |this, input, cx| {
+                let revision = input.read(cx).content_revision();
+                if this.workspace_search.input_revisions[index] != revision {
+                    this.workspace_search.input_revisions[index] = revision;
+                    this.cancel_workspace_search();
+                    this.workspace_search.report = None;
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         let commands = commands::CommandState::new(cx);
         cx.subscribe_in(&commands.input, window, |this, _, _, window, cx| {
             this.run_command_input(window, cx)
@@ -192,6 +226,7 @@ impl AppShell {
             documents: Vec::new(),
             quit_approvals: Vec::new(),
             commands,
+            workspace_search,
             panel: Panel::Output,
             terminal: None,
             explorer_visible: false,
@@ -326,6 +361,8 @@ impl AppShell {
                 terminal.set_restart_directory(path.clone())
             });
         }
+        self.cancel_workspace_search();
+        self.workspace_search.report = None;
         self.explorer_tree.reset(path.clone());
         self.explorer_selected = None;
         self.explorer_visible = true;
@@ -848,6 +885,9 @@ impl Render for AppShell {
                     this.show_editor(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &FindWorkspace, window, cx| {
+                this.show_workspace_search(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &Find, window, cx| {
                 this.open_bar(commands::Bar::Find, window, cx)
             }))
@@ -970,9 +1010,13 @@ impl Render for AppShell {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.explorer_visible, |row| {
-                        row.child(self.explorer_view(cx))
+                    .when(self.workspace_search.visible, |row| {
+                        row.child(self.workspace_search_view(cx))
                     })
+                    .when(
+                        self.explorer_visible && !self.workspace_search.visible,
+                        |row| row.child(self.explorer_view(cx)),
+                    )
                     .child(
                         div()
                             .flex()

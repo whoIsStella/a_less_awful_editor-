@@ -91,10 +91,13 @@ dependencies = [
  "ale-editor-core",
  "ale-editor-view",
  "ale-systems-core",
+ "globset",
  "gpui",
  "libc",
  "portable-pty",
+ "regex",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "vt100",
 ]
