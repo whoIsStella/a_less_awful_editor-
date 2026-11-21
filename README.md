@@ -23,14 +23,20 @@ Requires stable Rust and the native libraries listed below. From the project fol
 cargo run --locked -p a-less-awful-editor
 ```
 
-Open one existing file or folder directly:
+Open text files, a compiler location, a binary, or a folder directly:
 
 ```bash
-cargo run --locked -p a-less-awful-editor -- src/main.c
+cargo run --locked -p a-less-awful-editor -- src/main.c "src/input parser.c"
+cargo run --locked -p a-less-awful-editor -- --line 12 --column 4 src/main.c
 cargo run --locked -p a-less-awful-editor -- --binary build/firmware.elf
 cargo run --locked -p a-less-awful-editor -- --folder .
 ```
 
+Line and column numbers start at 1. Columns count Unicode scalar values.
+On Unix, pass `--reuse-window` first to send text paths to a running editor on
+the same display. This requires a private `XDG_RUNTIME_DIR`. For example,
+`a-less-awful-editor --reuse-window --line 12 --column 4 src/main.c` navigates
+in the open tab and preserves unsaved edits. A text launch accepts up to 32 paths.
 A plain path opens text. Use `--binary` for executable files or raw bytes,
 and `--folder` for the Files sidebar. Relative paths use the launch directory;
 quote paths containing spaces. Use `-- --name.c` for a text filename beginning
@@ -68,6 +74,7 @@ Inspection and byte patching work without it.
 | Close current document / quit | Ctrl+W / Ctrl+Q |
 | Next text tab | Ctrl+Tab |
 | Find / next / previous | Ctrl+F / F3 / Shift+F3 |
+| Find a file by partial path | Ctrl+P |
 | Search open folder | Ctrl+Shift+F |
 | Go to Line | Ctrl+G |
 | Move / select by word | Ctrl+Left/Right / Ctrl+Shift+Left/Right |
@@ -94,12 +101,22 @@ restart. Tab switching pauses during file operations so a save stays attached
 to its document.
 
 Find is literal and case-sensitive in the active text buffer. It scans a snapshot
-in the background, counts all matches and navigates the first 10,000. There is
-no Replace yet. Workspace Search honors ignore rules for disk files and open buffers.
+in the background, counts all matches and navigates the first 10,000. Workspace Search honors ignore rules for disk files and open buffers.
 It searches open unsaved buffers in place of disk contents. Case, whole-word and regex
 options and comma-separated include/exclude globs are available. Results identify
 incomplete scans. Search stops at 50,000 files and retains up to 10,000 matches. Files larger
 than 16 MiB, binary files, `target` and `node_modules` are excluded. A named buffer remains searchable after its file is removed from disk.
+
+To replace text, open Workspace Search, choose the search scope, enter search and
+replacement text, and run the search. Deselect any matches to keep. Choose Preview
+to review the edits, then Apply. Changed files appear as unsaved tabs. Save each
+tab to write it to disk. Undo all restores the tabs that still contain the applied
+revision. Files changed externally since preview are reported and skipped. If
+the preview reaches its 32 MiB limit, narrow the search or deselect matches.
+
+Quick Open indexes up to 50,000 filenames beneath the open folder using the workspace ignore rules.
+Type part of a relative path and press Enter or click a result. While the picker is open,
+it rescans two seconds after each scan completes. Escape closes it.
 
 The folder tree loads on demand and uses explicit Refresh. It bounds listings,
 cached folders, depth and visible rows. The terminal has resize and bounded

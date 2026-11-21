@@ -64,6 +64,20 @@ fn warning(report: &mut SearchReport, message: String) {
     }
 }
 
+pub(super) fn workspace_walk(root: &Path) -> Result<ignore::WalkBuilder, String> {
+    let mut exclusions = ignore::overrides::OverrideBuilder::new(root);
+    for pattern in ["!**/.git", "!**/target", "!**/node_modules"] {
+        exclusions.add(pattern).map_err(|e| e.to_string())?;
+    }
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .require_git(false)
+        .add_custom_ignore_filename(".rgignore")
+        .overrides(exclusions.build().map_err(|e| e.to_string())?);
+    Ok(builder)
+}
+
 /// Counts include all matches scanned, including those beyond the display limit.
 /// Truncation means enumeration, reading, or result storage was incomplete.
 pub(crate) fn search(
@@ -72,26 +86,9 @@ pub(crate) fn search(
     options: SearchOptions,
     cancel: &AtomicBool,
 ) -> Result<SearchReport, String> {
-    if options.query.is_empty() {
-        return Err("Enter a search query.".into());
-    }
     let include = patterns(&options.include)?;
     let exclude = patterns(&options.exclude)?;
-    let expression = if options.regex {
-        options.query.clone()
-    } else {
-        regex::escape(&options.query)
-    };
-    let expression = if options.whole_word {
-        format!(r"\b(?:{expression})\b")
-    } else {
-        expression
-    };
-    let matcher = RegexBuilder::new(&expression)
-        .case_insensitive(!options.case_sensitive)
-        .size_limit(4 * 1024 * 1024)
-        .build()
-        .map_err(|error| format!("Invalid search expression: {error}"))?;
+    let matcher = compile_matcher(&options)?;
     let root = root
         .canonicalize()
         .map_err(|e| format!("Cannot open workspace: {e}"))?;
@@ -102,16 +99,7 @@ pub(crate) fn search(
             (path, item.text)
         })
         .collect();
-    let mut exclusions = ignore::overrides::OverrideBuilder::new(&root);
-    for pattern in ["!**/.git", "!**/target", "!**/node_modules"] {
-        exclusions.add(pattern).map_err(|e| e.to_string())?;
-    }
-    let mut builder = ignore::WalkBuilder::new(&root);
-    builder
-        .hidden(false)
-        .require_git(false)
-        .add_custom_ignore_filename(".rgignore")
-        .overrides(exclusions.build().map_err(|e| e.to_string())?);
+    let builder = workspace_walk(&root)?;
     let mut rules = builder.build_matchers().remove(0);
     let open_files = overlays.keys().filter_map(|path| {
         let relative = path.strip_prefix(&root).ok()?;
@@ -214,57 +202,7 @@ pub(crate) fn search(
         {
             continue;
         }
-        // Each match range is reported in Unicode scalar offsets, as used by the editor.
-        let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
-        let mut last_byte = 0;
-        let mut scalar = 0;
-        let mut line = 0;
-        let mut line_start = 0;
-        let mut column = 0;
-        for found in matcher.find_iter(&text) {
-            if cancel.load(Ordering::Relaxed) {
-                report.cancelled = true;
-                report.truncated = true;
-                break;
-            }
-            let prefix = &text[last_byte..found.start()];
-            scalar += prefix.chars().count();
-            line += prefix.bytes().filter(|byte| *byte == b'\n').count();
-            if let Some(pos) = prefix.rfind('\n') {
-                line_start = last_byte + pos + 1;
-                column = prefix[pos + 1..].chars().count();
-            } else {
-                column += prefix.chars().count();
-            }
-            let end = scalar + found.as_str().chars().count();
-            report.total += 1;
-            if report.matches.len() < MAX_RESULTS {
-                let preview = text[line_start..]
-                    .chars()
-                    .take_while(|c| *c != '\n')
-                    .take(300)
-                    .collect();
-                report.matches.push(SearchMatch {
-                    path: path.clone(),
-                    line,
-                    column,
-                    range: scalar..end,
-                    preview,
-                    digest,
-                });
-            } else {
-                report.truncated = true;
-            }
-            line += found.as_str().bytes().filter(|byte| *byte == b'\n').count();
-            if let Some(pos) = found.as_str().rfind('\n') {
-                line_start = found.start() + pos + 1;
-                column = found.as_str()[pos + 1..].chars().count();
-            } else {
-                column += found.as_str().chars().count();
-            }
-            scalar = end;
-            last_byte = found.end();
-        }
+        collect_matches(&path, &text, &matcher, cancel, &mut report);
         if report.cancelled {
             break;
         }
@@ -272,10 +210,133 @@ pub(crate) fn search(
     Ok(report)
 }
 
+pub(crate) fn compile_matcher(options: &SearchOptions) -> Result<regex::Regex, String> {
+    if options.query.is_empty() {
+        return Err("Enter a search query.".into());
+    }
+    let expression = if options.regex {
+        options.query.clone()
+    } else {
+        regex::escape(&options.query)
+    };
+    let expression = if options.whole_word {
+        format!(r"\b(?:{expression})\b")
+    } else {
+        expression
+    };
+    RegexBuilder::new(&expression)
+        .case_insensitive(!options.case_sensitive)
+        .size_limit(4 * 1024 * 1024)
+        .build()
+        .map_err(|error| format!("Invalid search expression: {error}"))
+}
+
+pub(crate) fn search_buffer(
+    path: PathBuf,
+    text: String,
+    options: SearchOptions,
+    cancel: &AtomicBool,
+) -> Result<SearchReport, String> {
+    let matcher = compile_matcher(&options)?;
+    let mut report = SearchReport::default();
+    if cancel.load(Ordering::Relaxed) {
+        report.cancelled = true;
+        report.truncated = true;
+    } else {
+        collect_matches(&path, &text, &matcher, cancel, &mut report);
+    }
+    Ok(report)
+}
+
+fn collect_matches(
+    path: &Path,
+    text: &str,
+    matcher: &regex::Regex,
+    cancel: &AtomicBool,
+    report: &mut SearchReport,
+) {
+    // Each match range is reported in Unicode scalar offsets, as used by the editor.
+    let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
+    let mut last_byte = 0;
+    let mut scalar = 0;
+    let mut line = 0;
+    let mut line_start = 0;
+    let mut column = 0;
+    for found in matcher.find_iter(text) {
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
+            report.truncated = true;
+            break;
+        }
+        let prefix = &text[last_byte..found.start()];
+        scalar += prefix.chars().count();
+        line += prefix.bytes().filter(|byte| *byte == b'\n').count();
+        if let Some(pos) = prefix.rfind('\n') {
+            line_start = last_byte + pos + 1;
+            column = prefix[pos + 1..].chars().count();
+        } else {
+            column += prefix.chars().count();
+        }
+        let end = scalar + found.as_str().chars().count();
+        report.total += 1;
+        if report.matches.len() < MAX_RESULTS {
+            let preview = text[line_start..]
+                .chars()
+                .take_while(|c| *c != '\n')
+                .take(300)
+                .collect();
+            report.matches.push(SearchMatch {
+                path: path.to_path_buf(),
+                line,
+                column,
+                range: scalar..end,
+                preview,
+                digest,
+            });
+        } else {
+            report.truncated = true;
+        }
+        line += found.as_str().bytes().filter(|byte| *byte == b'\n').count();
+        if let Some(pos) = found.as_str().rfind('\n') {
+            line_start = found.start() + pos + 1;
+            column = found.as_str()[pos + 1..].chars().count();
+        } else {
+            column += found.as_str().chars().count();
+        }
+        scalar = end;
+        last_byte = found.end();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn standalone_buffer_search_uses_the_same_unicode_offsets() {
+        let options = SearchOptions {
+            query: "needle".into(),
+            ..Default::default()
+        };
+        let result = search_buffer(
+            "untitled".into(),
+            "λ needle".into(),
+            options.clone(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.matches[0].range, 2..8);
+        let cancelled = search_buffer(
+            "untitled".into(),
+            String::new(),
+            options,
+            &AtomicBool::new(true),
+        )
+        .unwrap();
+        assert!(cancelled.cancelled);
+    }
 
     #[test]
     fn deleted_buffers_follow_workspace_ignore_rules() {

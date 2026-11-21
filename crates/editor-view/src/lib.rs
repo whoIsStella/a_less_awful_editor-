@@ -85,6 +85,13 @@ impl EditorView {
         self.buffer.set_selection(range.start, range.end);
         self.changed(cx);
     }
+    /// Replace the document as one undoable edit.
+    pub fn replace_document(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.finish_composition();
+        self.buffer.replace_range(0..self.buffer.len_chars(), text);
+        self.changed(cx);
+    }
+
     pub fn edit_command(&mut self, command: EditCommand, cx: &mut Context<Self>) {
         self.finish_composition();
         match command {
@@ -109,6 +116,20 @@ impl EditorView {
                 }
             }
         }
+        self.changed(cx);
+    }
+
+    pub fn go_to_location(&mut self, line: usize, column: usize, cx: &mut Context<Self>) {
+        self.finish_composition();
+        let line = line.min(self.buffer.line_count() - 1);
+        let length = self
+            .buffer
+            .line_content(line)
+            .unwrap_or_default()
+            .chars()
+            .count();
+        self.buffer
+            .move_to(self.buffer.line_start(line) + column.min(length), false);
         self.changed(cx);
     }
 
