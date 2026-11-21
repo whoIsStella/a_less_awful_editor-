@@ -466,11 +466,9 @@ impl AppShell {
                             continue;
                         }
                     };
-                    let editor = if preview.version.is_none()
-                        && active_entity == Some(this.editor.entity_id())
+                    let editor = if loaded.is_none()
+                        || this.path.as_ref().is_some_and(|p| same_path(p, &path))
                     {
-                        Some(this.editor.clone())
-                    } else if this.path.as_ref().is_some_and(|p| same_path(p, &path)) {
                         Some(this.editor.clone())
                     } else {
                         this.documents
@@ -1048,8 +1046,7 @@ mod tests {
                     .matches
                     .iter()
                     .enumerate()
-                    .filter(|(_, m)| m.path == a)
-                    .next_back()
+                    .rfind(|(_, m)| m.path == a)
                     .unwrap()
                     .0;
                 s.workspace_search.selected[last_a] = false;

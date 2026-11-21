@@ -111,6 +111,36 @@ impl AppShell {
     }
 }
 
+#[cfg(unix)]
+impl AppShell {
+    pub fn accept_open_requests(
+        &mut self,
+        receiver: std::sync::mpsc::Receiver<(Vec<PathBuf>, usize, usize)>,
+        guard: Box<dyn std::any::Any>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let _server_guard = guard;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let Ok(()) = this.update_in(cx, |this, window, cx| {
+                    if !this.busy
+                        && let Ok((paths, line, column)) = receiver.try_recv()
+                    {
+                        this.open_text_targets(paths, line, column, window, cx);
+                    }
+                }) else {
+                    break;
+                };
+            }
+        })
+        .detach();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,43 +189,5 @@ mod tests {
             assert!(retained.editor.read(cx).text().starts_with("unsaved "));
             assert!(shell.status.contains("missing.c"));
         });
-    }
-}
-
-#[cfg(unix)]
-impl AppShell {
-    pub fn accept_open_requests(
-        &mut self,
-        receiver: std::sync::mpsc::Receiver<(Vec<PathBuf>, usize, usize)>,
-        guard: Box<dyn std::any::Any>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn_in(window, async move |this, cx| {
-            let mut pending = std::collections::VecDeque::new();
-            let guard = guard;
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(100))
-                    .await;
-                let _ = &guard;
-                while pending.len() < 32 {
-                    match receiver.try_recv() {
-                        Ok(request) => pending.push_back(request),
-                        Err(_) => break,
-                    }
-                }
-                let Ok(()) = this.update_in(cx, |this, window, cx| {
-                    if !this.busy
-                        && let Some((paths, line, column)) = pending.pop_front()
-                    {
-                        this.open_text_targets(paths, line, column, window, cx);
-                    }
-                }) else {
-                    break;
-                };
-            }
-        })
-        .detach();
     }
 }
