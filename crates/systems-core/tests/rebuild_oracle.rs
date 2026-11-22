@@ -144,6 +144,7 @@ int main(void) {
             "-fno-stack-protector",
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
+            "-fcf-protection=none",
             "-fno-jump-tables",
             "-ffunction-sections",
             "-fdata-sections",
@@ -397,6 +398,7 @@ void _start(void) { long r=example(7); __asm__ volatile("syscall" : : "a"(60), "
             "-fno-stack-protector",
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
+            "-fcf-protection=none",
             "-fno-jump-tables",
             "-ffunction-sections",
             "-fdata-sections",
@@ -521,6 +523,7 @@ int example(int x){unsigned i=(unsigned)x&7; counter+=table[i]; return helper(co
             "-fno-stack-protector",
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
+            "-fcf-protection=none",
             "-fno-jump-tables",
             "-ffunction-sections",
             "-fdata-sections",
@@ -797,6 +800,7 @@ fn et_exec_self_recursion_calls_new_body() {
             "-fno-stack-protector",
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
+            "-fcf-protection=none",
             "-fno-jump-tables",
             "-ffunction-sections",
             "-fdata-sections",
@@ -928,6 +932,7 @@ fn et_exec_rejects_bss_dynamic_relocations_and_ambiguous_data() {
                 "-fno-stack-protector",
                 "-fno-asynchronous-unwind-tables",
                 "-fno-unwind-tables",
+                "-fcf-protection=none",
                 "-fno-jump-tables",
                 "-ffunction-sections",
                 "-fdata-sections",
@@ -1125,6 +1130,7 @@ fn pie_rejects_dsos_static_pie_and_unsupported_relocations() {
             "-fno-stack-protector",
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
+            "-fcf-protection=none",
             "-fno-jump-tables",
             "-ffunction-sections",
             "-fdata-sections",
@@ -1211,6 +1217,7 @@ fn pie_rejects_dsos_static_pie_and_unsupported_relocations() {
                 "-fno-stack-protector",
                 "-fno-asynchronous-unwind-tables",
                 "-fno-unwind-tables",
+                "-fcf-protection=none",
                 "-fno-jump-tables",
                 "-ffunction-sections",
                 "-fdata-sections",
@@ -1229,14 +1236,16 @@ fn pie_rejects_dsos_static_pie_and_unsupported_relocations() {
             String::from_utf8_lossy(&report.stdout).contains(expected_relocation),
             "{label}"
         );
-        assert!(
+        assert_eq!(
             RelocatableUnit::parse(
                 &fs::read(&object).unwrap(),
                 "example",
                 &RebuildLimits::default(),
                 &c
             )
-            .is_err(),
+            .unwrap_err()
+            .code,
+            RebuildErrorCode::UnsupportedRelocation,
             "{label}"
         );
         save(&format!("pie-negative-{label}.txt"), &report.stdout);
@@ -1260,6 +1269,7 @@ fn pie_rejects_dsos_static_pie_and_unsupported_relocations() {
             "-fno-stack-protector",
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
+            "-fcf-protection=none",
             "-fno-jump-tables",
             "-ffunction-sections",
             "-fdata-sections",

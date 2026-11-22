@@ -89,6 +89,8 @@ pub(crate) fn compile_object(
         .args([
             "-fno-asynchronous-unwind-tables",
             "-fno-unwind-tables",
+            // Replacement profiles do not support CET requirements.
+            "-fcf-protection=none",
             "-fno-jump-tables",
             "-ffunction-sections",
             "-fdata-sections",
