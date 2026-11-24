@@ -493,7 +493,11 @@ impl AppShell {
                             }
                             let editor = cx.new(|cx| EditorView::new("", cx));
                             editor.update(cx, |e, cx| e.load(loaded.buffer, cx));
-                            cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+                            cx.observe(&editor, |this, _, cx| {
+                                this.schedule_session_checkpoint(cx);
+                                cx.notify();
+                            })
+                            .detach();
                             this.document_order.push(editor.entity_id());
                             this.documents.push(documents::Document {
                                 editor: editor.clone(),

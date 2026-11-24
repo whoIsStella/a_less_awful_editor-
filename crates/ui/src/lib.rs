@@ -8,6 +8,8 @@ pub mod prompts;
 mod quick_open;
 mod recompiler;
 mod save_trace;
+mod session_store;
+mod session_ui;
 mod systems;
 mod systems_io;
 mod systems_shell;
@@ -113,6 +115,7 @@ pub struct AppShell {
     document_order: Vec<gpui::EntityId>,
     quit_approvals: Vec<(gpui::EntityId, u64)>,
     commands: commands::CommandState,
+    session: session_ui::SessionState,
     quick_open: quick_open::FilePicker,
     workspace_search: workspace_search_ui::SearchState,
     panel: Panel,
@@ -174,7 +177,11 @@ impl AppShell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| EditorView::new("", cx));
         editor.read(cx).focus_handle(cx).focus(window);
-        cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+        cx.observe(&editor, |this, _, cx| {
+            this.schedule_session_checkpoint(cx);
+            cx.notify();
+        })
+        .detach();
         let quick_open = quick_open::FilePicker::new(window, cx);
         let workspace_search = workspace_search_ui::SearchState::new(cx);
         for input in [
@@ -236,6 +243,7 @@ impl AppShell {
             documents: Vec::new(),
             quit_approvals: Vec::new(),
             commands,
+            session: session_ui::SessionState::new(cx),
             quick_open,
             workspace_search,
             panel: Panel::Output,
@@ -367,6 +375,7 @@ impl AppShell {
     }
 
     fn select_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_session(path.clone(), window, cx);
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_restart_directory(path.clone())
@@ -647,7 +656,9 @@ impl AppShell {
                 match result {
                     Ok(version) => {
                         this.trace_save(cx, SaveTraceEvent::WriteAcknowledged);
-                        this.path = Some(path);
+                        if let Some(previous) = this.path.replace(path) {
+                            this.clear_recovery_conflict(&previous);
+                        }
                         this.disk = Some(version);
                         this.editor
                             .update(cx, |editor, cx| editor.mark_saved(&snapshot, cx));
@@ -793,6 +804,8 @@ impl AppShell {
     fn show_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.panels_visible = true;
         self.panel = Panel::Terminal;
+        self.session.active_pane = "terminal".into();
+        self.schedule_session_checkpoint(cx);
         if self.terminal.is_none() {
             let directory = self
                 .explorer_tree
@@ -816,6 +829,7 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.watch_editor_focus(window, cx);
         let position = self.editor.read(cx).cursor();
         let text_dirty = self.editor.read(cx).is_dirty();
         let text_name = self
@@ -884,6 +898,7 @@ impl Render for AppShell {
                     .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.panel = panel;
+                        this.schedule_session_checkpoint(cx);
                         if panel == Panel::Terminal {
                             this.show_terminal(window, cx);
                         }
@@ -953,6 +968,7 @@ impl Render for AppShell {
             }))
             .on_action(cx.listener(|this, _: &TogglePanels, _, cx| {
                 this.panels_visible = !this.panels_visible;
+                this.schedule_session_checkpoint(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Close, window, cx| this.close_document(window, cx)))
@@ -1077,6 +1093,7 @@ impl Render for AppShell {
                             })),
                     ),
             )
+            .child(self.recovery_view(cx))
             .when(self.panels_visible, |root| {
                 root.child(
                     div()
@@ -1093,6 +1110,33 @@ impl Render for AppShell {
                             v.flex_1()
                                 .min_h_0()
                                 .when_some(self.terminal.as_ref(), |v, t| v.child(t.clone()))
+                                .when(self.terminal.is_none(), |v| {
+                                    v.child(
+                                        div()
+                                            .track_focus(&self.session.terminal_focus)
+                                            .key_context("Terminal")
+                                            .h_full()
+                                            .w_full()
+                                            .px_3()
+                                            .py_2()
+                                            .child(
+                                                "Terminal paused. Press Enter or click to start.",
+                                            )
+                                            .on_key_down(cx.listener(
+                                                |this, event: &gpui::KeyDownEvent, window, cx| {
+                                                    if event.keystroke.key == "enter" {
+                                                        this.show_terminal(window, cx);
+                                                    }
+                                                },
+                                            ))
+                                            .on_mouse_down(
+                                                gpui::MouseButton::Left,
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.show_terminal(window, cx)
+                                                }),
+                                            ),
+                                    )
+                                })
                         }))
                         .when(self.panel != Panel::Terminal, |view| {
                             view.child(

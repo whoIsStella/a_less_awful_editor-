@@ -134,6 +134,17 @@ impl EditorBuffer {
         }
     }
 
+    /// Restore a draft while retaining its unsaved state.
+    pub fn recovered(text: &str, dirty: bool, anchor: usize, head: usize) -> Self {
+        let mut buffer = Self::with_text(text);
+        if dirty {
+            buffer.revision = 1;
+            buffer.next_revision = 2;
+        }
+        buffer.set_selection(anchor.min(buffer.len_chars()), head.min(buffer.len_chars()));
+        buffer
+    }
+
     pub fn text_snapshot(&self) -> TextSnapshot {
         TextSnapshot {
             text: self.text.clone(),
