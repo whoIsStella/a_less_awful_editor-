@@ -34,6 +34,7 @@ fn compiler_object_with_calls_data_and_readonly_sections_is_admitted() {
             "-c",
             "-O1",
             "-ffreestanding",
+            "-fcf-protection=none",
             "-fno-builtin",
             "-fno-stack-protector",
             "-fno-asynchronous-unwind-tables",
