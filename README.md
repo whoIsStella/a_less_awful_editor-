@@ -96,8 +96,7 @@ Opening a folder does not run anything. Run your build command yourself.
 Up to 32 text documents per window, 16 MiB per input text file and 64 MiB per
 binary. Text must be regular UTF-8. Symlink paths are rejected. Saving over an
 existing text file is supported on Linux; other systems can Save As to a new file.
-Unsaved documents are checked when closing or quitting. Tabs do not survive a
-restart. Tab switching pauses during file operations so a save stays attached
+Unsaved documents are checked when closing or quitting. Reopen the same folder to restore its text tabs and recover unsaved drafts. Tab switching pauses during file operations so a save stays attached
 to its document.
 
 Find is literal and case-sensitive in the active text buffer. It scans a snapshot

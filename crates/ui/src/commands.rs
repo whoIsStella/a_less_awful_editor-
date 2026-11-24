@@ -313,6 +313,7 @@ impl AppShell {
             PreviousMatch => self.find_match(true, cx),
             Files => {
                 self.explorer_visible = !self.explorer_visible;
+                self.schedule_session_checkpoint(cx);
             }
             Refresh => {
                 let paths = self.explorer_tree.refresh();
@@ -321,9 +322,11 @@ impl AppShell {
             Output => {
                 self.panel = Panel::Output;
                 self.panels_visible = true;
+                self.schedule_session_checkpoint(cx);
             }
             Panels => {
                 self.panels_visible = !self.panels_visible;
+                self.schedule_session_checkpoint(cx);
             }
             Editor => self.show_editor(window, cx),
             Assembly => self.show_systems(Lens::Assembly, window, cx),

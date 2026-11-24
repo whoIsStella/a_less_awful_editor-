@@ -40,7 +40,11 @@ impl AppShell {
             return false;
         }
         let editor = cx.new(|cx| EditorView::new("", cx));
-        cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+        cx.observe(&editor, |this, _, cx| {
+            this.schedule_session_checkpoint(cx);
+            cx.notify();
+        })
+        .detach();
         self.document_order.push(editor.entity_id());
         let old = self.exchange_document(Document {
             editor,
@@ -54,6 +58,7 @@ impl AppShell {
         }
         self.close_text_revision = None;
         self.dismiss_transient(cx);
+        self.schedule_session_checkpoint(cx);
         true
     }
     pub(super) fn activate_document(
@@ -67,6 +72,7 @@ impl AppShell {
         }
         let next = self.documents.remove(index);
         let old = self.exchange_document(next);
+        self.watch_editor_focus(window, cx);
         self.documents.insert(index, old);
         self.close_text_revision = self
             .quit_approvals
@@ -78,6 +84,7 @@ impl AppShell {
         }
         self.dismiss_transient(cx);
         self.show_editor(window, cx);
+        self.schedule_session_checkpoint(cx);
     }
     pub(super) fn open_document(
         &mut self,
@@ -136,7 +143,11 @@ impl AppShell {
     pub(super) fn discard_active_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.documents.pop().unwrap_or_else(|| {
             let editor = cx.new(|cx| EditorView::new("", cx));
-            cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+            cx.observe(&editor, |this, _, cx| {
+                this.schedule_session_checkpoint(cx);
+                cx.notify();
+            })
+            .detach();
             Document {
                 editor,
                 path: None,
@@ -145,6 +156,9 @@ impl AppShell {
             }
         });
         let old = self.exchange_document(next);
+        if let Some(path) = &old.path {
+            self.clear_recovery_conflict(path);
+        }
         self.document_order
             .retain(|id| *id != old.editor.entity_id());
         if !self.document_order.contains(&self.editor.entity_id()) {
@@ -159,6 +173,7 @@ impl AppShell {
         self.dismiss_transient(cx);
         self.systems_active = false;
         self.finish("Document closed", window, cx);
+        self.schedule_session_checkpoint(cx);
     }
     pub(super) fn continue_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let revision = self.editor.read(cx).content_revision();

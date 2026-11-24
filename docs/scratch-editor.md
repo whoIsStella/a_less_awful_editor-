@@ -2,9 +2,8 @@
 
 The editor starts with an empty **Untitled** buffer and retains up to 32 text
 buffers in tabs. Each keeps its own edits, selection and undo history. A dot in
-the tab and a `*` in the native title mark unsaved changes. Nothing is written
-until Save or Save As succeeds. Reopening an open path selects its existing
-buffer. Tabs and unsaved text are not restored after a restart.
+the tab and a `*` in the native title mark unsaved changes. Save or Save As
+writes the source file. Reopening an open path selects its existing buffer. Open the same workspace folder to recover its text tabs and drafts.
 
 Use Open to choose a file. The Output panel displays recoverable file errors.
 Use **Open Folder** to select a root and **Files** to show or hide its tree.
@@ -19,6 +18,29 @@ empty-folder and read-error messages appear below the affected folder.
 Symbolic links are skipped. Limits are 500 entries per directory, 128 cached
 folders, 32 levels of nesting and 2,500 visible rows. Collapse folders and refresh
 to free the folder cache when its limit is reached.
+
+## Recover workspace drafts
+
+On Linux, open a folder to enable session recovery. The editor checkpoints its
+text tabs in the background. After a crash, open the same folder in a fresh
+editor window. The last completed checkpoint restores the tab order, active
+text tab, selections and panel visibility. Edits made after that checkpoint
+can be lost. The terminal panel can regain focus without starting a shell.
+Terminal processes, binary patches, and undo history are outside the text checkpoint.
+Opening a different folder while working keeps the current tabs visible. Open
+the other folder in a fresh window to use its independent session.
+
+When a draft and its file have both changed, select **Review** beside the
+filename. Compare **Original** (the file before editing), **Disk** (the file
+now), and **Recovered** (the draft). Close the review to edit the draft.
+Use **Save As** to keep both versions. Restoring a session never writes to the
+source files.
+
+Recovery files contain source text. They are stored under
+`$XDG_STATE_HOME/a-less-awful-editor/sessions`, or under
+`~/.local/state/a-less-awful-editor/sessions` when the state directory is
+unset. One editor window at a time can checkpoint a given folder.
+If another window holds the session lock, use that window to recover the drafts.
 
 The Terminal panel provides a Linux PTY shell with interrupt, paste, resize,
 stop and restart. Open Folder only browses files: run your build command
@@ -99,8 +121,7 @@ unsupported.
 
 **Concurrency/durability limits:** the last comparison and replacement are not
 one compare-and-swap operation. Another writer can race between them; parent
-path components can also race. There is no cross-process lock, watcher, backup,
-crash recovery, or protection against hostile directory mutation. Reads cannot
+path components can also race. Source-file saves do not lock out other processes or protect against hostile directory mutation. Workspace recovery keeps a separate local copy of the editor session. Reads cannot
 promise a coherent snapshot against writers changing data in place while
 restoring metadata. Atomic rename/sync behavior depends on the filesystem;
 durability depends on your storage and filesystem. Process

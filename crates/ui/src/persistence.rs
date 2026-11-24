@@ -19,6 +19,10 @@ pub(crate) struct DiskVersion {
 }
 
 impl DiskVersion {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     fn new(bytes: Vec<u8>, meta: &Metadata) -> Self {
         Self {
             bytes,

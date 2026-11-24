@@ -237,7 +237,12 @@ impl RelocatableUnit {
             if s.flags & !0x36 != 0 || s.kind != 1 {
                 return Err(err(
                     RebuildErrorCode::UnsupportedObject,
-                    "Writable, TLS or unsupported allocated section",
+                    &format!(
+                        "Unsupported allocated section {:?} (type {}, flags {:#x})",
+                        string(names, s.name)?,
+                        s.kind,
+                        s.flags
+                    ),
                 ));
             }
             let kind = if s.flags & 4 != 0 {

@@ -22,6 +22,8 @@ impl AppShell {
 
     pub(super) fn show_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.systems_active = false;
+        self.session.active_pane = "editor".into();
+        self.schedule_session_checkpoint(cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -222,7 +224,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         match intent {
-            BinaryIntent::Close => cx.quit(),
+            BinaryIntent::Close => self.finish_session_quit(window, cx),
             BinaryIntent::CloseDocument => {
                 self.workbench = None;
                 self.replacement_target = None;

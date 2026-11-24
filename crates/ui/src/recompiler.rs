@@ -74,6 +74,8 @@ pub(crate) fn compile_object(
             "-O2",
             "-m64",
             "-ffreestanding",
+            // This profile targets non-CET images, matching rebuild admission.
+            "-fcf-protection=none",
             "-fno-builtin",
             "-fno-stack-protector",
         ]);

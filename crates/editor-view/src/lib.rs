@@ -80,6 +80,12 @@ impl EditorView {
     pub fn line_count(&self) -> usize {
         self.buffer.line_count()
     }
+    pub fn restore_selection(&mut self, anchor: usize, head: usize, cx: &mut Context<Self>) {
+        self.finish_composition();
+        self.buffer.set_selection(anchor, head);
+        self.changed(cx);
+    }
+
     pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.finish_composition();
         self.buffer.set_selection(range.start, range.end);
